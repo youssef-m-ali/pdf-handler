@@ -41,7 +41,7 @@ export default function HomePage() {
             <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "#5C6B3A" }}>
               <FileStack className="w-3.5 h-3.5 text-white" />
             </div>
-            PDFriend
+            PDF Araby
           </Link>
           <nav className="flex items-center gap-6 text-sm" style={{ color: "#6B7355" }}>
             <Link href="#tools" className="hover:text-gray-900 transition-colors">Tools</Link>
@@ -151,7 +151,7 @@ export default function HomePage() {
             <div className="w-5 h-5 rounded flex items-center justify-center" style={{ background: "#5C6B3A" }}>
               <FileStack className="w-2.5 h-2.5 text-white" />
             </div>
-            <span className="font-medium" style={{ color: "#6B7355" }}>PDFriend</span>
+            <span className="font-medium" style={{ color: "#6B7355" }}>PDF Araby</span>
             <span>— free & open source</span>
           </div>
           <div className="flex items-center gap-5">

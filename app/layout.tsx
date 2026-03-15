@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PDFriend — Free PDF tools, right in your browser",
+  title: "PDF Araby — Free PDF tools, right in your browser",
   description:
     "Merge, split, reorder, compress, and convert PDFs for free. Everything runs in your browser — your files never leave your device.",
 };

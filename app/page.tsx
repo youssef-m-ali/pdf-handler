@@ -101,7 +101,7 @@ export default function HomePage() {
                 <Link
                   key={href}
                   href={href}
-                  className="group flex flex-col gap-4 p-5 rounded-2xl border border-gray-100 hover:border-[#C8D4A8] hover:shadow-lg transition-all duration-200"
+                  className="group flex flex-col gap-4 p-5 rounded-2xl border border-gray-100 hover:border-[#C8D4A8] transition-all duration-200 [box-shadow:4px_6px_8px_rgba(0,0,0,0.07)] hover:[box-shadow:4px_6px_12px_rgba(0,0,0,0.12)]"
                   style={{ background: "#FAFAF8" }}
                 >
                   <div

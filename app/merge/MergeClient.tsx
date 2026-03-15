@@ -6,40 +6,44 @@ import { useDropzone } from "react-dropzone";
 import {
   DndContext,
   closestCenter,
+  DragOverlay,
   PointerSensor,
   KeyboardSensor,
   useSensor,
   useSensors,
   DragEndEvent,
+  DragStartEvent,
 } from "@dnd-kit/core";
 import {
   arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
-  verticalListSortingStrategy,
+  rectSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { PDFDocument } from "pdf-lib";
 import {
   ArrowLeft,
   UploadCloud,
-  GripVertical,
   X,
   FileText,
   Download,
   Loader2,
+  RotateCw,
 } from "lucide-react";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PdfFile {
   id: string;
   file: File;
   pageCount: number | null;
+  thumbnail: string | null;   // data-URL, null while loading or on failure
+  thumbLoading: boolean;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -57,20 +61,147 @@ async function readPageCount(file: File): Promise<number | null> {
   }
 }
 
+async function generateThumbnail(file: File): Promise<string | null> {
+  try {
+    // Dynamic import keeps pdfjs away from the SSR bundle
+    const pdfjsLib = await import("pdfjs-dist");
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+    }
+
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+    const page = await pdf.getPage(1);
+
+    const viewport = page.getViewport({ scale: 0.5 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await page.render({ canvasContext: ctx as any, viewport }).promise;
+    return canvas.toDataURL("image/jpeg", 0.75);
+  } catch {
+    return null;
+  }
+}
+
 async function mergePdfs(files: File[]): Promise<Uint8Array> {
   const merged = await PDFDocument.create();
   for (const file of files) {
     const buf = await file.arrayBuffer();
     const pdf = await PDFDocument.load(buf);
     const copied = await merged.copyPages(pdf, pdf.getPageIndices());
-    copied.forEach((page) => merged.addPage(page));
+    copied.forEach((p) => merged.addPage(p));
   }
   return merged.save();
 }
 
-// ─── Sortable file row ────────────────────────────────────────────────────────
+// ─── Card (used both in sortable list and drag overlay) ───────────────────────
 
-function SortableItem({
+function PdfCard({
+  item,
+  index,
+  onRemove,
+  isDragging = false,
+}: {
+  item: PdfFile;
+  index: number;
+  onRemove?: (id: string) => void;
+  isDragging?: boolean;
+}) {
+  return (
+    // Outer wrapper — `relative` so we can absolutely position the info pill above the card
+    <div className="group relative flex flex-col select-none">
+
+      {/* Info pill — floats above the card, visible on hover */}
+      {onRemove && (
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-[calc(100%+6px)] z-20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+          <div className="flex items-center gap-1 bg-black/70 backdrop-blur-sm text-white text-[10px] font-medium px-2.5 py-1 rounded-full">
+            {formatBytes(item.file.size)}
+            {item.pageCount !== null && (
+              <> · {item.pageCount} {item.pageCount === 1 ? "page" : "pages"}</>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Card — no overflow-hidden so the badge can bleed past the bottom border */}
+      <div
+        className={`relative aspect-[3/4] rounded-2xl border bg-white ${
+          isDragging
+            ? "border-[#7A8F4E] shadow-xl ring-2 ring-[#7A8F4E]/30"
+            : "border-gray-200 [box-shadow:4px_6px_8px_rgba(0,0,0,0.12)]"
+        }`}
+      >
+        {/* Thumbnail — clipped inside its own rounded container */}
+        {item.thumbLoading ? (
+          <div className="absolute inset-0 rounded-2xl flex items-center justify-center">
+            <Loader2 className="w-5 h-5 animate-spin" style={{ color: "#A8BA80" }} />
+          </div>
+        ) : item.thumbnail ? (
+          <div className="absolute inset-0 rounded-2xl overflow-hidden p-4 flex items-center justify-center">
+            <img
+              src={item.thumbnail}
+              alt={item.file.name}
+              className="w-full h-full object-contain"
+              draggable={false}
+            />
+          </div>
+        ) : (
+          <div className="absolute inset-0 rounded-2xl flex items-center justify-center">
+            <FileText className="w-8 h-8" style={{ color: "#C8D4A8" }} />
+          </div>
+        )}
+
+        {/* Action buttons — top-right, visible on hover */}
+        {onRemove && (
+          <div
+            className="absolute top-2 right-2 flex gap-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {/* TODO: wire up rotation once the rotate feature is implemented */}
+            <button
+              disabled
+              className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm opacity-50 cursor-not-allowed"
+              aria-label="Rotate (coming soon)"
+              title="Rotate (coming soon)"
+            >
+              <RotateCw className="w-3 h-3 text-gray-600" />
+            </button>
+            <button
+              onClick={() => onRemove(item.id)}
+              className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm hover:bg-white transition-colors"
+              aria-label="Remove file"
+            >
+              <X className="w-3 h-3 text-gray-600" />
+            </button>
+          </div>
+        )}
+
+        {/* Order badge — center sits on the bottom border */}
+        <div
+          className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center shadow-sm z-10"
+          style={{ background: "#5C6B3A" }}
+        >
+          <span className="text-[9px] font-bold text-white leading-none">{index + 1}</span>
+        </div>
+      </div>
+
+      {/* Filename — mt-4 to clear the half-badge that bleeds below the card */}
+      <p className="mt-4 text-[11px] text-center text-gray-500 truncate px-1 leading-tight">
+        {item.file.name}
+      </p>
+    </div>
+  );
+}
+
+// ─── Sortable wrapper around PdfCard ─────────────────────────────────────────
+
+function SortableCard({
   item,
   index,
   onRemove,
@@ -88,90 +219,61 @@ function SortableItem({
       style={{
         transform: CSS.Transform.toString(transform),
         transition,
-        opacity: isDragging ? 0.45 : 1,
-        zIndex: isDragging ? 20 : undefined,
+        opacity: isDragging ? 0 : 1, // hide original while dragging (overlay shows instead)
       }}
-      className="flex items-center gap-3 px-4 py-3 bg-white border border-gray-100 rounded-xl"
+      className="cursor-grab active:cursor-grabbing"
+      {...attributes}
+      {...listeners}
     >
-      {/* order badge */}
-      <span
-        className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 text-white"
-        style={{ background: "#A8BA80" }}
-      >
-        {index + 1}
-      </span>
-
-      {/* drag handle */}
-      <button
-        {...attributes}
-        {...listeners}
-        className="touch-none cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-400 transition-colors"
-        aria-label="Drag to reorder"
-      >
-        <GripVertical className="w-4 h-4" />
-      </button>
-
-      {/* file icon */}
-      <div
-        className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-        style={{ background: "#EDF0E6" }}
-      >
-        <FileText className="w-4 h-4" style={{ color: "#5C6B3A" }} />
-      </div>
-
-      {/* name + meta */}
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-900 truncate">{item.file.name}</p>
-        <p className="text-xs mt-0.5" style={{ color: "#6B7355" }}>
-          {formatBytes(item.file.size)}
-          {item.pageCount !== null && (
-            <span>
-              {" "}
-              · {item.pageCount} {item.pageCount === 1 ? "page" : "pages"}
-            </span>
-          )}
-        </p>
-      </div>
-
-      {/* remove */}
-      <button
-        onClick={() => onRemove(item.id)}
-        className="flex-shrink-0 text-gray-300 hover:text-red-400 transition-colors"
-        aria-label="Remove file"
-      >
-        <X className="w-4 h-4" />
-      </button>
+      <PdfCard item={item} index={index} onRemove={onRemove} />
     </div>
   );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function MergeClient() {
   const [files, setFiles] = useState<PdfFile[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  // ── Drop handler ─────────────────────────────────────────────────────────
+  // ── Drop ─────────────────────────────────────────────────────────────────
   const onDrop = useCallback(async (accepted: File[]) => {
     setDownloadUrl(null);
     setError(null);
 
-    const newItems: PdfFile[] = await Promise.all(
-      accepted.map(async (file) => ({
-        id: `${file.name}-${Date.now()}-${Math.random()}`,
-        file,
-        pageCount: await readPageCount(file),
-      }))
-    );
+    // Insert placeholders immediately so the grid updates at once
+    const placeholders: PdfFile[] = accepted.map((file) => ({
+      id: `${file.name}-${Date.now()}-${Math.random()}`,
+      file,
+      pageCount: null,
+      thumbnail: null,
+      thumbLoading: true,
+    }));
 
-    setFiles((prev) => [...prev, ...newItems]);
+    setFiles((prev) => [...prev, ...placeholders]);
+
+    // Enrich each placeholder with page count + thumbnail asynchronously
+    placeholders.forEach(async (placeholder) => {
+      const [pageCount, thumbnail] = await Promise.all([
+        readPageCount(placeholder.file),
+        generateThumbnail(placeholder.file),
+      ]);
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === placeholder.id
+            ? { ...f, pageCount, thumbnail, thumbLoading: false }
+            : f
+        )
+      );
+    });
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -180,9 +282,13 @@ export default function MergeClient() {
     multiple: true,
   });
 
-  // ── Reorder ───────────────────────────────────────────────────────────────
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
+  // ── Reorder ──────────────────────────────────────────────────────────────
+  function handleDragStart({ active }: DragStartEvent) {
+    setActiveId(active.id as string);
+  }
+
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setActiveId(null);
     if (over && active.id !== over.id) {
       setFiles((prev) => {
         const from = prev.findIndex((f) => f.id === active.id);
@@ -192,13 +298,12 @@ export default function MergeClient() {
     }
   }
 
-  // ── Merge ─────────────────────────────────────────────────────────────────
+  // ── Merge ────────────────────────────────────────────────────────────────
   async function handleMerge() {
     if (files.length < 2) return;
     setIsProcessing(true);
     setError(null);
     setDownloadUrl(null);
-
     try {
       const bytes = await mergePdfs(files.map((f) => f.file));
       const blob = new Blob([bytes], { type: "application/pdf" });
@@ -211,6 +316,8 @@ export default function MergeClient() {
     }
   }
 
+  const activeItem = files.find((f) => f.id === activeId);
+  const activeIndex = files.findIndex((f) => f.id === activeId);
   const totalPages = files.reduce((s, f) => s + (f.pageCount ?? 0), 0);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -218,10 +325,10 @@ export default function MergeClient() {
     <div className="min-h-screen flex flex-col bg-white">
       {/* Navbar */}
       <header className="border-b border-gray-100 sticky top-0 z-10 bg-white/90 backdrop-blur">
-        <div className="max-w-3xl mx-auto px-6 h-14 flex items-center gap-3 text-sm">
+        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center gap-3 text-sm">
           <Link
             href="/"
-            className="flex items-center gap-1.5 transition-colors hover:text-gray-900"
+            className="flex items-center gap-1.5 hover:text-gray-900 transition-colors"
             style={{ color: "#6B7355" }}
           >
             <ArrowLeft className="w-3.5 h-3.5" />
@@ -233,7 +340,7 @@ export default function MergeClient() {
       </header>
 
       <main className="flex-1 py-12 px-6">
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-4xl mx-auto">
           {/* Page header */}
           <div className="mb-8">
             <h1 className="text-2xl font-bold text-gray-900 mb-1">Merge PDFs</h1>
@@ -245,7 +352,7 @@ export default function MergeClient() {
           {/* Drop zone */}
           <div
             {...getRootProps()}
-            className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-colors mb-5 ${
+            className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors mb-6 ${
               isDragActive
                 ? "border-[#7A8F4E] bg-[#F5F6F0]"
                 : "border-gray-200 bg-[#FAFAF8] hover:border-[#A8BA80] hover:bg-[#F5F6F0]"
@@ -253,7 +360,7 @@ export default function MergeClient() {
           >
             <input {...getInputProps()} />
             <UploadCloud
-              className="w-8 h-8 mx-auto mb-3 transition-colors"
+              className="w-7 h-7 mx-auto mb-2 transition-colors"
               style={{ color: isDragActive ? "#5C6B3A" : "#A8BA80" }}
             />
             <p className="text-sm font-medium text-gray-700">
@@ -264,10 +371,11 @@ export default function MergeClient() {
             </p>
           </div>
 
-          {/* File list */}
+          {/* Grid */}
           {files.length > 0 && (
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-3">
+            <div className="mb-6 rounded-2xl p-4" style={{ background: "#EAEDE3" }}>
+              {/* Grid header */}
+              <div className="flex items-center justify-between mb-4">
                 <p
                   className="text-xs font-semibold uppercase tracking-widest"
                   style={{ color: "#A8BA80" }}
@@ -276,11 +384,7 @@ export default function MergeClient() {
                   {totalPages > 0 && ` · ${totalPages} pages total`}
                 </p>
                 <button
-                  onClick={() => {
-                    setFiles([]);
-                    setDownloadUrl(null);
-                    setError(null);
-                  }}
+                  onClick={() => { setFiles([]); setDownloadUrl(null); setError(null); }}
                   className="text-xs hover:text-red-400 transition-colors"
                   style={{ color: "#A8BA80" }}
                 >
@@ -291,15 +395,17 @@ export default function MergeClient() {
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
+                onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
+                onDragCancel={() => setActiveId(null)}
               >
                 <SortableContext
                   items={files.map((f) => f.id)}
-                  strategy={verticalListSortingStrategy}
+                  strategy={rectSortingStrategy}
                 >
-                  <div className="flex flex-col gap-2">
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
                     {files.map((item, index) => (
-                      <SortableItem
+                      <SortableCard
                         key={item.id}
                         item={item}
                         index={index}
@@ -311,6 +417,15 @@ export default function MergeClient() {
                     ))}
                   </div>
                 </SortableContext>
+
+                {/* Drag ghost */}
+                <DragOverlay>
+                  {activeItem ? (
+                    <div className="cursor-grabbing">
+                      <PdfCard item={activeItem} index={activeIndex} isDragging />
+                    </div>
+                  ) : null}
+                </DragOverlay>
               </DndContext>
             </div>
           )}
@@ -322,7 +437,7 @@ export default function MergeClient() {
             </div>
           )}
 
-          {/* Hint when only 1 file */}
+          {/* Hint */}
           {files.length === 1 && (
             <p className="text-center text-sm mb-4" style={{ color: "#A8BA80" }}>
               Add at least one more PDF to merge.

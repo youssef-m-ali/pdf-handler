@@ -31,6 +31,7 @@ import {
   Download,
   Loader2,
   RotateCw,
+  ArrowDownAZ,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -316,6 +317,11 @@ export default function MergeClient() {
     }
   }
 
+  function handleSortByName() {
+    setFiles((prev) => [...prev].sort((a, b) => a.file.name.localeCompare(b.file.name)));
+    setDownloadUrl(null);
+  }
+
   const activeItem = files.find((f) => f.id === activeId);
   const activeIndex = files.findIndex((f) => f.id === activeId);
   const totalPages = files.reduce((s, f) => s + (f.pageCount ?? 0), 0);
@@ -383,13 +389,33 @@ export default function MergeClient() {
                   {files.length} {files.length === 1 ? "file" : "files"}
                   {totalPages > 0 && ` · ${totalPages} pages total`}
                 </p>
-                <button
-                  onClick={() => { setFiles([]); setDownloadUrl(null); setError(null); }}
-                  className="text-xs hover:text-red-400 transition-colors"
-                  style={{ color: "#A8BA80" }}
-                >
-                  Remove all
-                </button>
+                <div className="flex items-center gap-3">
+                  {/* Sort by name */}
+                  <div className="relative group/sort">
+                    <button
+                      onClick={handleSortByName}
+                      className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-white/60 transition-colors"
+                      style={{ color: "#A8BA80" }}
+                      aria-label="Sort files by name"
+                    >
+                      <ArrowDownAZ className="w-3.5 h-3.5" />
+                    </button>
+                    {/* Tooltip */}
+                    <div className="pointer-events-none absolute bottom-full right-0 mb-1.5 opacity-0 group-hover/sort:opacity-100 transition-opacity whitespace-nowrap">
+                      <span className="bg-gray-800 text-white text-[10px] font-medium px-2 py-1 rounded-md">
+                        Order files by name
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => { setFiles([]); setDownloadUrl(null); setError(null); }}
+                    className="text-xs hover:text-red-400 transition-colors"
+                    style={{ color: "#A8BA80" }}
+                  >
+                    Remove all
+                  </button>
+                </div>
               </div>
 
               <DndContext

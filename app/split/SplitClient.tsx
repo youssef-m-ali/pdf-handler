@@ -272,13 +272,13 @@ export default function SplitClient() {
     setError(null);
     try {
       const total = pages.length;
-      const chunk = Math.floor(total / splitInto);
+      const chunk = Math.ceil(total / splitInto);
       const zip = new JSZip();
 
       for (let i = 0; i < splitInto; i++) {
         const start = i * chunk;
         if (start >= total) break;
-        const end = i === splitInto - 1 ? total : start + chunk; // last part takes remainder
+        const end = Math.min(start + chunk, total); // last part may be smaller
         const indices = Array.from({ length: end - start }, (_, j) => start + j);
         const bytes = await buildPdf(file, indices);
         const label = String(i + 1).padStart(2, "0");
@@ -297,8 +297,8 @@ export default function SplitClient() {
 
   const hasFile = file !== null && pages.length > 0;
 
-  // Derived split values — floor so last part absorbs remainder, never empty
-  const chunkSize    = pages.length > 0 ? Math.floor(pages.length / splitInto) : 1;
+  // Derived split values — ceil so most parts are equal, last part is smaller or equal
+  const chunkSize    = pages.length > 0 ? Math.ceil(pages.length / splitInto) : 1;
   const lastPartSize = pages.length > 0 ? pages.length - (splitInto - 1) * chunkSize : 0;
   const splitIsExact = pages.length % splitInto === 0;
 
@@ -317,7 +317,7 @@ export default function SplitClient() {
     const n = parseInt(val);
     if (!isNaN(n) && n >= 2 && n <= pages.length) {
       setSplitInto(n);
-      setPagesStr(Math.floor(pages.length / n).toString());
+      setPagesStr(Math.ceil(pages.length / n).toString());
     }
   }
 

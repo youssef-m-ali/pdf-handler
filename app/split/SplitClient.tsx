@@ -453,24 +453,13 @@ export default function SplitClient() {
                       ? `${selectedPages.size} of ${pages.length} selected`
                       : "Click pages to select"}
                   </p>
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={selectAll}
-                      className="text-xs hover:text-gray-900 transition-colors"
-                      style={{ color: "#A8BA80" }}
-                    >
-                      Select all
-                    </button>
-                    {selectedPages.size > 0 && (
-                      <button
-                        onClick={deselectAll}
-                        className="text-xs hover:text-red-400 transition-colors"
-                        style={{ color: "#A8BA80" }}
-                      >
-                        Deselect all
-                      </button>
-                    )}
-                  </div>
+                  <button
+                    onClick={selectedPages.size === pages.length ? deselectAll : selectAll}
+                    className="text-xs hover:text-gray-900 transition-colors"
+                    style={{ color: "#A8BA80" }}
+                  >
+                    {selectedPages.size === pages.length ? "Deselect all" : "Select all"}
+                  </button>
                 </div>
               )}
 

@@ -1,4 +1,4 @@
-# PDF Araby
+# Bolt PDF
 
 Free PDF tools that run entirely in your browser. Merge, split, reorder, compress, convert, watermark, protect, and extract text from PDFs — no uploads, no sign-up, no cost.
 

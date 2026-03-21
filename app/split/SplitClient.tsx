@@ -145,14 +145,59 @@ function SplitDivider() {
   );
 }
 
+// ─── Range helpers ────────────────────────────────────────────────────────────
+
+// Returns pages in the order the user entered them (respects range direction, deduplicates)
+function parsePageRange(input: string, total: number): { pages: number[]; invalid: boolean } {
+  if (!input.trim()) return { pages: [], invalid: false };
+  const seen = new Set<number>();
+  const result: number[] = [];
+  let invalid = false;
+  for (const part of input.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const rangeMatch = trimmed.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const a = parseInt(rangeMatch[1]), b = parseInt(rangeMatch[2]);
+      if (a < 1 || b < 1 || a > total || b > total) { invalid = true; continue; }
+      const step = a <= b ? 1 : -1;
+      for (let i = a; i !== b + step; i += step) {
+        if (!seen.has(i)) { seen.add(i); result.push(i); }
+      }
+    } else if (/^\d+$/.test(trimmed)) {
+      const n = parseInt(trimmed);
+      if (n < 1 || n > total) { invalid = true; continue; }
+      if (!seen.has(n)) { seen.add(n); result.push(n); }
+    } else {
+      invalid = true;
+    }
+  }
+  return { pages: result, invalid };
+}
+
+function pagesToRangeString(selected: number[]): string {
+  const sorted = [...new Set(selected)].sort((a, b) => a - b);
+  if (!sorted.length) return "";
+  const ranges: string[] = [];
+  let start = sorted[0], end = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === end + 1) { end = sorted[i]; }
+    else { ranges.push(start === end ? `${start}` : `${start}-${end}`); start = end = sorted[i]; }
+  }
+  ranges.push(start === end ? `${start}` : `${start}-${end}`);
+  return ranges.join(", ");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function SplitClient() {
   const [file, setFile] = useState<File | null>(null);
   const [pages, setPages] = useState<PageItem[]>([]);
   const [mode, setMode] = useState<Mode>("extract");
-  const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
+  const [selectedPages, setSelectedPages] = useState<number[]>([]);
+  const [rangeStr, setRangeStr] = useState("");
   const [splitInto, setSplitInto] = useState(2);
+  const [drivingField, setDrivingField] = useState<"pages" | "parts">("parts");
   // String states so inputs allow empty/partial values while typing
   const [pagesStr, setPagesStr] = useState("8");
   const [partsStr, setPartsStr] = useState("2");
@@ -164,7 +209,8 @@ export default function SplitClient() {
   async function loadPdf(f: File) {
     setFile(f);
     setPages([]);
-    setSelectedPages(new Set());
+    setSelectedPages([]);
+    setRangeStr("");
     setError(null);
     setIsLoadingPages(true);
 
@@ -187,6 +233,7 @@ export default function SplitClient() {
         }))
       );
       setSplitInto(2);
+      setDrivingField("parts");
       setPagesStr(Math.floor(numPages / 2).toString());
       setPartsStr("2");
       setIsLoadingPages(false);
@@ -234,29 +281,47 @@ export default function SplitClient() {
   // ── Page selection (extract mode) ─────────────────────────────────────────
   function togglePage(n: number) {
     setSelectedPages((prev) => {
-      const next = new Set(prev);
-      next.has(n) ? next.delete(n) : next.add(n);
+      const next = prev.includes(n) ? prev.filter((p) => p !== n) : [...prev, n];
+      setRangeStr(pagesToRangeString(next));
       return next;
     });
   }
 
   function selectAll() {
-    setSelectedPages(new Set(pages.map((p) => p.pageNumber)));
+    const all = pages.map((p) => p.pageNumber);
+    setSelectedPages(all);
+    setRangeStr(pagesToRangeString(all));
   }
 
   function deselectAll() {
-    setSelectedPages(new Set());
+    setSelectedPages([]);
+    setRangeStr("");
   }
+
+  // ── Range text input ──────────────────────────────────────────────────────
+  function handleRangeChange(val: string) {
+    setRangeStr(val);
+    const { pages: parsed } = parsePageRange(val, pages.length);
+    setSelectedPages(parsed);
+  }
+
+  const rangeInvalid = rangeStr.trim() !== "" && parsePageRange(rangeStr, pages.length).invalid;
+  const selectedSet = new Set(selectedPages);
 
   // ── Extract ───────────────────────────────────────────────────────────────
   async function handleExtract() {
-    if (!file || selectedPages.size === 0) return;
+    if (!file || selectedPages.length === 0) return;
     setIsProcessing(true);
     setError(null);
     try {
-      const sorted = [...selectedPages].sort((a, b) => a - b);
-      const bytes = await buildPdf(file, sorted.map((n) => n - 1));
-      triggerDownload(bytes, "extracted-pages.pdf");
+      const bytes = await buildPdf(file, selectedPages.map((n) => n - 1));
+      const base = file.name.replace(/\.pdf$/i, "");
+      const min = Math.min(...selectedPages), max = Math.max(...selectedPages);
+      const isContiguous = max - min + 1 === selectedPages.length;
+      const suffix = isContiguous
+        ? `${selectedPages[0]}-${selectedPages[selectedPages.length - 1]}`
+        : "extracted";
+      triggerDownload(bytes, `${base}_${suffix}.pdf`);
     } catch (err) {
       console.error(err);
       setError("Something went wrong while extracting pages.");
@@ -272,21 +337,37 @@ export default function SplitClient() {
     setError(null);
     try {
       const total = pages.length;
-      const chunk = Math.ceil(total / splitInto);
+      const base = file.name.replace(/\.pdf$/i, "");
       const zip = new JSZip();
 
-      for (let i = 0; i < splitInto; i++) {
-        const start = i * chunk;
-        if (start >= total) break;
-        const end = Math.min(start + chunk, total); // last part may be smaller
-        const indices = Array.from({ length: end - start }, (_, j) => start + j);
-        const bytes = await buildPdf(file, indices);
-        const label = String(i + 1).padStart(2, "0");
-        zip.file(`part-${label}.pdf`, bytes);
+      if (drivingField === "pages") {
+        // Fixed chunk size — last part gets the remainder
+        const chunkN = Math.max(1, parseInt(pagesStr) || 1);
+        let start = 0;
+        while (start < total) {
+          const size = Math.min(chunkN, total - start);
+          const indices = Array.from({ length: size }, (_, j) => start + j);
+          const bytes = await buildPdf(file, indices);
+          zip.file(`${base}_${start + 1}-${start + size}.pdf`, bytes);
+          start += size;
+        }
+      } else {
+        // Equal distribution — floor+remainder spread across first parts
+        const baseSize = Math.floor(total / splitInto);
+        const extra    = total % splitInto;
+        let start = 0;
+        for (let i = 0; i < splitInto; i++) {
+          const size = baseSize + (i < extra ? 1 : 0);
+          if (size === 0) break;
+          const indices = Array.from({ length: size }, (_, j) => start + j);
+          const bytes = await buildPdf(file, indices);
+          zip.file(`${base}_${start + 1}-${start + size}.pdf`, bytes);
+          start += size;
+        }
       }
 
       const zipBytes = await zip.generateAsync({ type: "uint8array" });
-      triggerDownload(zipBytes, "split.zip");
+      triggerDownload(zipBytes, `${base}_split.zip`);
     } catch (err) {
       console.error(err);
       setError("Something went wrong while splitting.");
@@ -297,16 +378,22 @@ export default function SplitClient() {
 
   const hasFile = file !== null && pages.length > 0;
 
-  // Derived split values — ceil so most parts are equal, last part is smaller or equal
-  const chunkSize    = pages.length > 0 ? Math.ceil(pages.length / splitInto) : 1;
-  const lastPartSize = pages.length > 0 ? pages.length - (splitInto - 1) * chunkSize : 0;
-  const splitIsExact = pages.length % splitInto === 0;
+  // Derived values for "parts" mode (equal distribution)
+  const baseChunkSize   = pages.length > 0 ? Math.floor(pages.length / splitInto) : 1;
+  const remainder       = pages.length > 0 ? pages.length % splitInto : 0;
+  const splitIsExact    = remainder === 0;
+
+  // Derived values for "pages" mode (fixed chunk, last part smaller)
+  const userChunkSize   = Math.max(1, parseInt(pagesStr) || 1);
+  const pagesRemainder  = pages.length > 0 ? pages.length % userChunkSize : 0;
+  const pagesIsExact    = pagesRemainder === 0;
 
   function handlePagesChange(val: string) {
     setPagesStr(val);
     const n = parseInt(val);
     if (!isNaN(n) && n >= 1 && n < pages.length) {
       const newParts = Math.max(2, Math.ceil(pages.length / n));
+      setDrivingField("pages");
       setSplitInto(newParts);
       setPartsStr(newParts.toString());
     }
@@ -316,14 +403,35 @@ export default function SplitClient() {
     setPartsStr(val);
     const n = parseInt(val);
     if (!isNaN(n) && n >= 2 && n <= pages.length) {
+      setDrivingField("parts");
       setSplitInto(n);
-      setPagesStr(Math.ceil(pages.length / n).toString());
+      setPagesStr(Math.floor(pages.length / n).toString());
     }
   }
 
-  function syncInputsOnBlur() {
-    setPagesStr(chunkSize.toString());
-    setPartsStr(splitInto.toString());
+  function handlePagesBlur() {
+    const n = parseInt(pagesStr);
+    if (!isNaN(n) && n >= 1 && n < pages.length) {
+      const newParts = Math.max(2, Math.ceil(pages.length / n));
+      setDrivingField("pages");
+      setSplitInto(newParts);
+      setPartsStr(newParts.toString());
+      // keep pagesStr as the user typed — don't snap it
+    } else {
+      setPagesStr(baseChunkSize.toString());
+    }
+  }
+
+  function handlePartsBlur() {
+    const n = parseInt(partsStr);
+    if (!isNaN(n) && n >= 2 && n <= pages.length) {
+      setDrivingField("parts");
+      setSplitInto(n);
+      setPagesStr(Math.floor(pages.length / n).toString());
+    } else {
+      setPartsStr(splitInto.toString());
+      setPagesStr(baseChunkSize.toString());
+    }
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -407,7 +515,7 @@ export default function SplitClient() {
                 onClick={() => {
                   setFile(null);
                   setPages([]);
-                  setSelectedPages(new Set());
+                  setSelectedPages([]);
                   setError(null);
                 }}
                 className="text-xs hover:text-gray-900 transition-colors"
@@ -447,20 +555,47 @@ export default function SplitClient() {
 
               {/* ── Extract mode controls ── */}
               {mode === "extract" && (
+                <>
+                <input
+                  type="text"
+                  value={rangeStr}
+                  onChange={(e) => handleRangeChange(e.target.value)}
+                  placeholder="e.g. 1-5, 8, 11-13"
+                  className={`w-full px-3.5 py-2.5 text-sm rounded-xl border focus:outline-none focus:ring-2 mb-3 transition-colors ${
+                    rangeInvalid
+                      ? "border-red-300 bg-red-50 focus:ring-red-200"
+                      : "border-gray-200 bg-white focus:ring-[#7A8F4E]/20 focus:border-[#A8BA80]"
+                  }`}
+                />
                 <div className="flex items-center justify-between mb-4">
                   <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#A8BA80" }}>
-                    {selectedPages.size > 0
-                      ? `${selectedPages.size} of ${pages.length} selected`
+                    {selectedPages.length > 0
+                      ? `${selectedPages.length} of ${pages.length} selected`
                       : "Click pages to select"}
                   </p>
                   <button
-                    onClick={selectedPages.size === pages.length ? deselectAll : selectAll}
-                    className="text-xs hover:text-gray-900 transition-colors"
+                    onClick={selectedPages.length === pages.length ? deselectAll : selectAll}
+                    className="flex items-center gap-1.5 text-xs hover:text-gray-900 transition-colors"
                     style={{ color: "#A8BA80" }}
                   >
-                    {selectedPages.size === pages.length ? "Deselect all" : "Select all"}
+                    <span
+                      className="w-3.5 h-3.5 rounded flex items-center justify-center border transition-colors flex-shrink-0"
+                      style={
+                        selectedPages.length === pages.length
+                          ? { background: "#5C6B3A", borderColor: "#5C6B3A" }
+                          : { borderColor: "#A8BA80" }
+                      }
+                    >
+                      {selectedPages.length === pages.length && (
+                        <svg viewBox="0 0 10 8" className="w-2 h-2" fill="none">
+                          <path d="M1 4l2.5 2.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    {selectedPages.length === pages.length ? "Deselect all" : "Select all"}
                   </button>
                 </div>
+                </>
               )}
 
               {/* ── Split equally controls (converter-style) ── */}
@@ -472,14 +607,14 @@ export default function SplitClient() {
                     <div className="flex items-center justify-between px-5 py-4">
                       <div>
                         <p className="text-sm font-medium text-gray-700">Pages per part</p>
-                        {!splitIsExact && (
+                        {drivingField === "parts" && !splitIsExact && (
                           <p className="text-[10px] mt-0.5" style={{ color: "#A8BA80" }}>
-                            last part: {lastPartSize} page{lastPartSize !== 1 ? "s" : ""}
+                            parts will contain {baseChunkSize + 1} or {baseChunkSize} pages
                           </p>
                         )}
                       </div>
                       <div className="flex items-center gap-1">
-                        {!splitIsExact && (
+                        {drivingField === "parts" && !splitIsExact && (
                           <span className="text-base font-medium" style={{ color: "#A8BA80" }}>≈</span>
                         )}
                         <input
@@ -488,7 +623,7 @@ export default function SplitClient() {
                           max={pages.length - 1}
                           value={pagesStr}
                           onChange={(e) => handlePagesChange(e.target.value)}
-                          onBlur={syncInputsOnBlur}
+                          onBlur={handlePagesBlur}
                           className="no-spinner w-14 text-right text-xl font-bold text-gray-900 focus:outline-none bg-transparent"
                         />
                       </div>
@@ -499,14 +634,21 @@ export default function SplitClient() {
 
                     {/* Number of parts */}
                     <div className="flex items-center justify-between px-5 py-4">
-                      <p className="text-sm font-medium text-gray-700">Number of parts</p>
+                      <div>
+                        <p className="text-sm font-medium text-gray-700">Number of parts</p>
+                        {drivingField === "pages" && !pagesIsExact && (
+                          <p className="text-[10px] mt-0.5" style={{ color: "#A8BA80" }}>
+                            last part: {pagesRemainder} page{pagesRemainder !== 1 ? "s" : ""}
+                          </p>
+                        )}
+                      </div>
                       <input
                         type="number"
                         min={2}
                         max={pages.length}
                         value={partsStr}
                         onChange={(e) => handlePartsChange(e.target.value)}
-                        onBlur={syncInputsOnBlur}
+                        onBlur={handlePartsBlur}
                         className="no-spinner w-14 text-right text-xl font-bold text-gray-900 focus:outline-none bg-transparent"
                       />
                     </div>
@@ -516,18 +658,30 @@ export default function SplitClient() {
               )}
 
               {/* Page grid */}
-              <div className="rounded-2xl p-4 mb-6" style={{ background: "#EAEDE3" }}>
+              <div className="rounded-2xl p-4 mb-6 max-h-[520px] overflow-y-auto" style={{ background: "#EAEDE3" }}>
                 <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
                   {pages.map((page, idx) => (
                     <Fragment key={page.pageNumber}>
                       <PageCard
                         page={page}
-                        selected={selectedPages.has(page.pageNumber)}
+                        selected={selectedSet.has(page.pageNumber)}
                         selectable={mode === "extract"}
                         onToggle={() => togglePage(page.pageNumber)}
                       />
-                      {/* Divider after every chunk in split equally mode */}
-                      {mode === "split" && (idx + 1) % Math.ceil(pages.length / splitInto) === 0 && idx + 1 < pages.length && <SplitDivider />}
+                      {/* Divider at actual split boundaries */}
+                      {mode === "split" && idx + 1 < pages.length && (() => {
+                        if (drivingField === "pages") {
+                          // Fixed chunk: divider after every userChunkSize pages
+                          return (idx + 1) % userChunkSize === 0;
+                        }
+                        // Equal distribution: compute cumulative boundaries
+                        let pos = 0;
+                        for (let i = 0; i < splitInto - 1; i++) {
+                          pos += baseChunkSize + (i < remainder ? 1 : 0);
+                          if (pos - 1 === idx) return true;
+                        }
+                        return false;
+                      })() && <SplitDivider />}
                     </Fragment>
                   ))}
                 </div>
@@ -537,7 +691,7 @@ export default function SplitClient() {
               {mode === "extract" && (
                 <button
                   onClick={handleExtract}
-                  disabled={selectedPages.size === 0 || isProcessing}
+                  disabled={selectedPages.length === 0 || isProcessing}
                   className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-white transition-opacity disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
                   style={{ background: "#5C6B3A" }}
                 >
@@ -546,12 +700,12 @@ export default function SplitClient() {
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Extracting…
                     </>
-                  ) : selectedPages.size === 0 ? (
+                  ) : selectedPages.length === 0 ? (
                     "Select pages to extract"
                   ) : (
                     <>
                       <Download className="w-4 h-4" />
-                      Extract {selectedPages.size} {selectedPages.size === 1 ? "page" : "pages"}
+                      Extract {selectedPages.length} {selectedPages.length === 1 ? "page" : "pages"}
                     </>
                   )}
                 </button>

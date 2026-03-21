@@ -43,7 +43,7 @@ async function buildPdf(sourceFile: File, zeroIndexedPages: number[]): Promise<U
 }
 
 function triggerDownload(bytes: Uint8Array, filename: string) {
-  const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  const url = URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: "application/pdf" }));
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;

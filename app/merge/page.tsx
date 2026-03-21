@@ -2,7 +2,7 @@ import { Metadata } from "next";
 import MergeClient from "./MergeClient";
 
 export const metadata: Metadata = {
-  title: "Merge PDF — Bolt PDF",
+  title: "Merge PDF — Jolt PDF",
   description:
     "Combine multiple PDF files into one. Free, private, and runs entirely in your browser.",
 };

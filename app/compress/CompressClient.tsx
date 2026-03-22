@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { PDFDocument } from "pdf-lib";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
-import { PDFDocument } from "pdf-lib";
 import {
   ArrowLeft,
   UploadCloud,
@@ -42,17 +42,7 @@ function triggerDownload(bytes: Uint8Array, filename: string) {
   a.click();
 }
 
-async function compressLight(file: File): Promise<Uint8Array> {
-  const buf = await file.arrayBuffer();
-  const pdf = await PDFDocument.load(buf);
-  return pdf.save({ useObjectStreams: true });
-}
-
-async function compressRasterize(
-  file: File,
-  dpi: number,
-  jpegQuality: number
-): Promise<Uint8Array> {
+async function compressRasterize(file: File): Promise<Uint8Array> {
   const pdfjsLib = await import("pdfjs-dist");
   if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
@@ -62,37 +52,55 @@ async function compressRasterize(
   const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
   const out = await PDFDocument.create();
 
-  const scale = dpi / 72; // PDF points are 72 per inch
-
   for (let i = 1; i <= pdfDoc.numPages; i++) {
     const page = await pdfDoc.getPage(i);
-    const viewport = page.getViewport({ scale });
+    const viewport = page.getViewport({ scale: 1 }); // 72 DPI
 
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(viewport.width);
     canvas.height = Math.round(viewport.height);
 
-    const ctx = canvas.getContext("2d")!;
-    await page.render({ canvasContext: ctx as CanvasRenderingContext2D, viewport }).promise;
+    await page.render({ canvasContext: canvas.getContext("2d")! as CanvasRenderingContext2D, viewport }).promise;
 
-    const dataUrl = canvas.toDataURL("image/jpeg", jpegQuality);
-    const base64 = dataUrl.split(",")[1];
-    const imageBytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.35);
+    const imageBytes = Uint8Array.from(atob(dataUrl.split(",")[1]), (c) => c.charCodeAt(0));
     const jpegImage = await out.embedJpg(imageBytes);
 
-    // Use original page dimensions (scale=1) so physical size is preserved
-    const origViewport = page.getViewport({ scale: 1 });
-    const pdfPage = out.addPage([origViewport.width, origViewport.height]);
-    pdfPage.drawImage(jpegImage, {
-      x: 0,
-      y: 0,
-      width: origViewport.width,
-      height: origViewport.height,
-    });
+    const pdfPage = out.addPage([viewport.width, viewport.height]);
+    pdfPage.drawImage(jpegImage, { x: 0, y: 0, width: viewport.width, height: viewport.height });
   }
 
   return out.save({ useObjectStreams: true });
+}
+
+// Each call gets a fresh Ghostscript instance; the WASM binary is cached by
+// the browser after the first download (~18 MB).
+async function compressWithGhostscript(
+  file: File,
+  pdfsettings: string
+): Promise<Uint8Array> {
+  const { default: Module } = await import("@jspawn/ghostscript-wasm");
+  const gs = await Module({
+    locateFile: (path: string) =>
+      `https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/${path}`,
+  });
+
+  const buf = await file.arrayBuffer();
+  gs.FS.writeFile("/input.pdf", new Uint8Array(buf));
+
+  gs.callMain([
+    "-sDEVICE=pdfwrite",
+    "-dCompatibilityLevel=1.4",
+    `-dPDFSETTINGS=${pdfsettings}`,
+    "-dNOPAUSE",
+    "-dQUIET",
+    "-dBATCH",
+    "-sOutputFile=/output.pdf",
+    "/input.pdf",
+  ]);
+
+  const result: Uint8Array = gs.FS.readFile("/output.pdf");
+  return result;
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -101,23 +109,25 @@ const LEVELS: {
   id: CompressionLevel;
   label: string;
   desc: string;
+  pdfsettings?: string;
   warning?: string;
 }[] = [
   {
     id: "light",
     label: "Light",
-    desc: "Lossless structure optimization. All content is fully preserved.",
+    desc: "Printer quality (300 DPI images). Optimizes structure while preserving full quality.",
+    pdfsettings: "/printer",
   },
   {
     id: "balanced",
     label: "Balanced",
-    desc: "Rasterizes pages at 150 DPI for good size reduction.",
-    warning: "Text becomes non-searchable.",
+    desc: "eBook quality (150 DPI images). Good compression with readable output. Text stays searchable.",
+    pdfsettings: "/ebook",
   },
   {
     id: "maximum",
     label: "Maximum",
-    desc: "Rasterizes pages at 100 DPI for smallest file size.",
+    desc: "Rasterizes pages at 72 DPI. Smallest file size.",
     warning: "Text becomes non-searchable.",
   },
 ];
@@ -158,14 +168,9 @@ export default function CompressClient() {
     setResult(null);
 
     try {
-      let bytes: Uint8Array;
-      if (level === "light") {
-        bytes = await compressLight(file);
-      } else if (level === "balanced") {
-        bytes = await compressRasterize(file, 150, 0.75);
-      } else {
-        bytes = await compressRasterize(file, 100, 0.55);
-      }
+      const bytes = level === "maximum"
+        ? await compressRasterize(file)
+        : await compressWithGhostscript(file, LEVELS.find((l) => l.id === level)!.pdfsettings!);
       setResult({ bytes, originalSize: file.size, compressedSize: bytes.byteLength });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Compression failed.");
@@ -208,7 +213,10 @@ export default function CompressClient() {
             <h1 className="text-xl font-semibold text-gray-900">Compress PDF</h1>
           </div>
           <p className="text-sm pl-[42px]" style={{ color: "#6B7355" }}>
-            Reduce file size — everything runs locally in your browser.
+            Reduce file size — powered by Ghostscript, runs locally in your browser.
+          </p>
+          <p className="text-xs pl-[42px]" style={{ color: "#A8BA80" }}>
+            First run downloads the compression engine (~18 MB). Subsequent runs are instant.
           </p>
         </div>
 

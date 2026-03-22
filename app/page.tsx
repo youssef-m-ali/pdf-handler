@@ -24,7 +24,7 @@ const tools = [
   { href: "/split",     icon: Scissors,   label: "Split PDF",       description: "Extract pages or split a PDF at any page." },
   { href: "/organize",  icon: LayoutGrid, label: "Organize Pages",  description: "Reorder, rotate, and delete pages with drag & drop." },
   { href: "/compress",  icon: Minimize2,  label: "Compress PDF",    description: "Reduce file size without losing quality." },
-  { href: "/convert",   icon: Image,      label: "PDF to Image",    description: "Convert each page to PNG or JPEG." },
+  { href: "/convert/image", icon: Image,  label: "PDF to Image",    description: "Convert each page to PNG or JPEG." },
   { href: "/watermark", icon: Stamp,      label: "Watermark",       description: "Add a text or image watermark to your PDF." },
   { href: "/protect",   icon: Lock,       label: "Protect & Unlock",description: "Password-protect or unlock a PDF file." },
   { href: "/extract",   icon: FileText,   label: "Extract Text",    description: "Pull all text content out of any PDF." },

@@ -58,11 +58,17 @@ async function applyWatermark(
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
     const textWidth = font.widthOfTextAtSize(text, fontSize);
-    const textHeight = font.heightAtSize(fontSize);
+    const angleRad = (rotation * Math.PI) / 180;
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
+
+    // Anchor point so the center of the text lands at the center of the page
+    const x = width  / 2 - cosA * (textWidth / 2) + sinA * (fontSize / 2);
+    const y = height / 2 - sinA * (textWidth / 2) - cosA * (fontSize / 2);
 
     page.drawText(text, {
-      x: width / 2 - textWidth / 2,
-      y: height / 2 - textHeight / 2,
+      x,
+      y,
       size: fontSize,
       font,
       color: rgb(0.5, 0.5, 0.5),
@@ -345,8 +351,8 @@ export default function WatermarkClient() {
             <div className="rounded-2xl p-4 max-h-[520px] overflow-y-auto" style={{ background: "#EAEDE3" }}>
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
                 {thumbnails.map((src, i) => (
-                  <div key={i} className="flex flex-col gap-2">
-                    <div className="relative aspect-[3/4] rounded-2xl border border-gray-200 bg-white overflow-hidden [box-shadow:4px_6px_8px_rgba(0,0,0,0.10)]">
+                  <div key={i} className="flex flex-col gap-2 pb-4">
+                    <div className="relative aspect-[3/4] rounded-2xl border border-gray-200 bg-white [box-shadow:4px_6px_8px_rgba(0,0,0,0.10)]">
                       <img src={src} alt={`Page ${i + 1}`} className="absolute inset-0 w-full h-full object-contain p-2" draggable={false} />
                       <div
                         className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center shadow-sm z-10"

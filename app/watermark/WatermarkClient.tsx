@@ -11,13 +11,13 @@ import {
   Download,
   Loader2,
   Stamp,
-  CheckCircle2,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Rotation = 0 | 45 | -45 | 90;
 type Size = "small" | "medium" | "large";
+type Step = "configure" | "preview";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -74,6 +74,26 @@ async function applyWatermark(
   return pdfDoc.save();
 }
 
+async function renderThumbnails(bytes: Uint8Array): Promise<string[]> {
+  const pdfjsLib = await import("pdfjs-dist");
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+  }
+  const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const thumbs: string[] = [];
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const viewport = page.getViewport({ scale: 0.4 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await page.render({ canvasContext: canvas.getContext("2d") as any, viewport }).promise;
+    thumbs.push(canvas.toDataURL("image/jpeg", 0.8));
+  }
+  return thumbs;
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const SIZE_OPTIONS: { id: Size; label: string }[] = [
@@ -92,19 +112,24 @@ const ROTATION_OPTIONS: { value: Rotation; label: string }[] = [
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function WatermarkClient() {
-  const [file, setFile]             = useState<File | null>(null);
-  const [text, setText]             = useState("");
-  const [size, setSize]             = useState<Size>("medium");
-  const [opacity, setOpacity]       = useState(30);
-  const [rotation, setRotation]     = useState<Rotation>(45);
+  const [file, setFile]                 = useState<File | null>(null);
+  const [text, setText]                 = useState("");
+  const [size, setSize]                 = useState<Size>("medium");
+  const [opacity, setOpacity]           = useState(30);
+  const [rotation, setRotation]         = useState<Rotation>(45);
+  const [step, setStep]                 = useState<Step>("configure");
+  const [result, setResult]             = useState<Uint8Array | null>(null);
+  const [thumbnails, setThumbnails]     = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [result, setResult]         = useState<Uint8Array | null>(null);
-  const [error, setError]           = useState<string | null>(null);
+  const [error, setError]               = useState<string | null>(null);
 
-  const reset = () => { setFile(null); setResult(null); setError(null); };
+  const reset = () => {
+    setFile(null); setResult(null); setThumbnails([]);
+    setStep("configure"); setError(null);
+  };
 
   const onDrop = useCallback((accepted: File[]) => {
-    if (accepted[0]) { setFile(accepted[0]); setResult(null); setError(null); }
+    if (accepted[0]) { setFile(accepted[0]); setResult(null); setThumbnails([]); setStep("configure"); setError(null); }
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -113,14 +138,16 @@ export default function WatermarkClient() {
     multiple: false,
   });
 
-  const handleApply = async () => {
+  const handleNext = async () => {
     if (!file || !text.trim()) return;
     setIsProcessing(true);
     setError(null);
-    setResult(null);
     try {
       const bytes = await applyWatermark(file, text.trim(), size, opacity, rotation);
+      const thumbs = await renderThumbnails(bytes);
       setResult(bytes);
+      setThumbnails(thumbs);
+      setStep("preview");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to apply watermark.");
     } finally {
@@ -161,7 +188,7 @@ export default function WatermarkClient() {
           </p>
         </div>
 
-        {/* Dropzone or file info */}
+        {/* File bar */}
         {!file ? (
           <div
             {...getRootProps()}
@@ -194,144 +221,157 @@ export default function WatermarkClient() {
                 <p className="text-xs" style={{ color: "#6B7355" }}>{formatBytes(file.size)}</p>
               </div>
             </div>
-            <button onClick={reset} className="text-xs transition-colors hover:text-gray-600" style={{ color: "#A8BA80" }}>
-              Change
+            {step === "preview" ? (
+              <button
+                onClick={() => setStep("configure")}
+                className="flex items-center gap-1 text-xs transition-colors hover:text-gray-900"
+                style={{ color: "#6B7355" }}
+              >
+                <ArrowLeft className="w-3 h-3" /> Change settings
+              </button>
+            ) : (
+              <button onClick={reset} className="text-xs transition-colors hover:text-gray-600" style={{ color: "#A8BA80" }}>
+                Change
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* ── Configure step ── */}
+        {file && step === "configure" && (
+          <>
+            <div className="flex flex-col gap-5">
+
+              {/* Text */}
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>
+                  Watermark text
+                </p>
+                <input
+                  type="text"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="e.g. CONFIDENTIAL"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#7A8F4E]/20 focus:border-[#A8BA80] transition-colors"
+                />
+              </div>
+
+              {/* Size */}
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Size</p>
+                <div className="flex gap-2">
+                  {SIZE_OPTIONS.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSize(s.id)}
+                      className={`flex-1 py-2.5 px-3 rounded-xl text-sm font-medium border transition-all ${
+                        size === s.id ? "border-[#5C6B3A] text-white" : "border-gray-200 text-gray-600 hover:border-[#C8D4A8]"
+                      }`}
+                      style={size === s.id ? { background: "#5C6B3A" } : { background: "#FAFAF8" }}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Rotation */}
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Rotation</p>
+                <div className="flex gap-2">
+                  {ROTATION_OPTIONS.map((r) => (
+                    <button
+                      key={r.value}
+                      onClick={() => setRotation(r.value)}
+                      className={`flex-1 py-2.5 px-3 rounded-xl text-sm font-medium border transition-all ${
+                        rotation === r.value ? "border-[#5C6B3A] text-white" : "border-gray-200 text-gray-600 hover:border-[#C8D4A8]"
+                      }`}
+                      style={rotation === r.value ? { background: "#5C6B3A" } : { background: "#FAFAF8" }}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Opacity */}
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Opacity</p>
+                  <p className="text-xs font-semibold tabular-nums" style={{ color: "#6B7355" }}>{opacity}%</p>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={80}
+                  value={opacity}
+                  onChange={(e) => setOpacity(Number(e.target.value))}
+                  className="w-full accent-[#5C6B3A]"
+                />
+                <div className="flex justify-between text-[10px]" style={{ color: "#C8D4A8" }}>
+                  <span>Subtle</span>
+                  <span>Bold</span>
+                </div>
+              </div>
+
+            </div>
+
+            {error && (
+              <div className="px-4 py-3 rounded-xl bg-red-50 border border-red-100 text-sm text-red-600">{error}</div>
+            )}
+
+            <button
+              onClick={handleNext}
+              disabled={isProcessing || !text.trim()}
+              className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-white disabled:opacity-40 transition-opacity text-sm cursor-pointer disabled:cursor-not-allowed"
+              style={{ background: "#5C6B3A" }}
+            >
+              {isProcessing ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> Generating preview…</>
+              ) : (
+                "Next"
+              )}
             </button>
-          </div>
+          </>
         )}
 
-        {/* Settings */}
-        {file && !result && (
-          <div className="flex flex-col gap-5">
+        {/* ── Preview step ── */}
+        {file && step === "preview" && result && (
+          <>
+            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>
+              Preview — {thumbnails.length} {thumbnails.length === 1 ? "page" : "pages"}
+            </p>
 
-            {/* Text input */}
-            <div className="flex flex-col gap-1.5">
-              <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>
-                Watermark text
-              </p>
-              <input
-                type="text"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="e.g. CONFIDENTIAL"
-                className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#7A8F4E]/20 focus:border-[#A8BA80] transition-colors"
-              />
-            </div>
-
-            {/* Size */}
-            <div className="flex flex-col gap-1.5">
-              <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Size</p>
-              <div className="flex gap-2">
-                {SIZE_OPTIONS.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => setSize(s.id)}
-                    className={`flex-1 py-2.5 px-3 rounded-xl text-sm font-medium border transition-all ${
-                      size === s.id
-                        ? "border-[#5C6B3A] text-white"
-                        : "border-gray-200 text-gray-600 hover:border-[#C8D4A8]"
-                    }`}
-                    style={size === s.id ? { background: "#5C6B3A" } : { background: "#FAFAF8" }}
-                  >
-                    {s.label}
-                  </button>
+            <div className="rounded-2xl p-4 max-h-[520px] overflow-y-auto" style={{ background: "#EAEDE3" }}>
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+                {thumbnails.map((src, i) => (
+                  <div key={i} className="flex flex-col gap-2">
+                    <div className="relative aspect-[3/4] rounded-2xl border border-gray-200 bg-white overflow-hidden [box-shadow:4px_6px_8px_rgba(0,0,0,0.10)]">
+                      <img src={src} alt={`Page ${i + 1}`} className="absolute inset-0 w-full h-full object-contain p-2" draggable={false} />
+                      <div
+                        className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center shadow-sm z-10"
+                        style={{ background: "#A8BA80" }}
+                      >
+                        <span className="text-[9px] font-bold text-white leading-none">{i + 1}</span>
+                      </div>
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
 
-            {/* Rotation */}
-            <div className="flex flex-col gap-1.5">
-              <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Rotation</p>
-              <div className="flex gap-2">
-                {ROTATION_OPTIONS.map((r) => (
-                  <button
-                    key={r.value}
-                    onClick={() => setRotation(r.value)}
-                    className={`flex-1 py-2.5 px-3 rounded-xl text-sm font-medium border transition-all ${
-                      rotation === r.value
-                        ? "border-[#5C6B3A] text-white"
-                        : "border-gray-200 text-gray-600 hover:border-[#C8D4A8]"
-                    }`}
-                    style={rotation === r.value ? { background: "#5C6B3A" } : { background: "#FAFAF8" }}
-                  >
-                    {r.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Opacity */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Opacity</p>
-                <p className="text-xs font-semibold tabular-nums" style={{ color: "#6B7355" }}>{opacity}%</p>
-              </div>
-              <input
-                type="range"
-                min={5}
-                max={80}
-                value={opacity}
-                onChange={(e) => setOpacity(Number(e.target.value))}
-                className="w-full accent-[#5C6B3A]"
-              />
-              <div className="flex justify-between text-[10px]" style={{ color: "#C8D4A8" }}>
-                <span>Subtle</span>
-                <span>Bold</span>
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {/* Error */}
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-red-50 border border-red-100 text-sm text-red-600">
-            {error}
-          </div>
-        )}
-
-        {/* Result */}
-        {result && (
-          <div className="flex flex-col gap-4 p-5 rounded-2xl border border-[#C8D4A8]" style={{ background: "#F5F6F0" }}>
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5" style={{ color: "#5C6B3A" }} />
-              <p className="font-semibold text-gray-900 text-sm">Watermark applied</p>
-            </div>
             <button
               onClick={() => {
                 const base = file!.name.replace(/\.pdf$/i, "");
                 triggerDownload(result, `${base}_watermarked.pdf`);
               }}
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-white text-sm"
+              className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-white text-sm"
               style={{ background: "#5C6B3A" }}
             >
               <Download className="w-4 h-4" />
               Download watermarked PDF
             </button>
-            <button
-              onClick={() => setResult(null)}
-              className="text-xs text-center transition-colors hover:text-gray-700"
-              style={{ color: "#A8BA80" }}
-            >
-              Change settings
-            </button>
-          </div>
-        )}
-
-        {/* Action */}
-        {file && !result && (
-          <button
-            onClick={handleApply}
-            disabled={isProcessing || !text.trim()}
-            className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-white disabled:opacity-40 transition-opacity text-sm cursor-pointer disabled:cursor-not-allowed"
-            style={{ background: "#5C6B3A" }}
-          >
-            {isProcessing ? (
-              <><Loader2 className="w-4 h-4 animate-spin" /> Applying…</>
-            ) : (
-              <><Stamp className="w-4 h-4" /> Apply Watermark</>
-            )}
-          </button>
+          </>
         )}
 
       </main>

@@ -52,25 +52,39 @@ function centerOffsets(w: number, h: number, rotation: Rotation) {
 async function applyTextWatermark(
   file: File, text: string, size: Size, opacity: number, rotation: Rotation
 ): Promise<Uint8Array> {
-  const buf     = await file.arrayBuffer();
-  const pdfDoc  = await PDFDocument.load(buf);
-  const font    = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const buf      = await file.arrayBuffer();
+  const pdfDoc   = await PDFDocument.load(buf);
+  const font     = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const fontSize = TEXT_SIZE_MAP[size];
+  const lineHeight = fontSize * 1.3;
+  const lines    = text.split("\n");
+  const N        = lines.length;
 
   for (const page of pdfDoc.getPages()) {
     const { width, height } = page.getSize();
-    const textWidth = font.widthOfTextAtSize(text, fontSize);
-    const { cosA, sinA } = centerOffsets(width, height, rotation);
-    const x = width  / 2 - cosA * (textWidth / 2) + sinA * (fontSize / 2);
-    const y = height / 2 - sinA * (textWidth / 2) - cosA * (fontSize / 2);
+    const rad  = (rotation * Math.PI) / 180;
+    const cosA = Math.cos(rad);
+    const sinA = Math.sin(rad);
 
-    page.drawText(text, {
-      x, y,
-      size: fontSize,
-      font,
-      color: rgb(0.5, 0.5, 0.5),
-      opacity: opacity / 100,
-      rotate: degrees(rotation),
+    lines.forEach((line, i) => {
+      if (!line.trim()) return; // skip blank lines (spacing still counted)
+      const lw = font.widthOfTextAtSize(line, fontSize);
+      // Perpendicular offset so the block of lines is centered as a whole
+      const deltaY = ((N - 1) / 2 - i) * lineHeight;
+      const cx = width  / 2 - sinA * deltaY;
+      const cy = height / 2 + cosA * deltaY;
+      // Anchor (baseline-left) so the center of this line lands at (cx, cy)
+      const x = cx - cosA * (lw / 2) + sinA * (fontSize / 2);
+      const y = cy - sinA * (lw / 2) - cosA * (fontSize / 2);
+
+      page.drawText(line, {
+        x, y,
+        size: fontSize,
+        font,
+        color: rgb(0.5, 0.5, 0.5),
+        opacity: opacity / 100,
+        rotate: degrees(rotation),
+      });
     });
   }
 
@@ -301,12 +315,12 @@ export default function WatermarkClient() {
               {wmType === "text" && (
                 <div className="flex flex-col gap-1.5">
                   <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#A8BA80" }}>Watermark text</p>
-                  <input
-                    type="text"
+                  <textarea
                     value={text}
                     onChange={(e) => setText(e.target.value)}
-                    placeholder="e.g. CONFIDENTIAL"
-                    className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#7A8F4E]/20 focus:border-[#A8BA80] transition-colors"
+                    placeholder={"e.g. CONFIDENTIAL\nDo not distribute"}
+                    rows={3}
+                    className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#7A8F4E]/20 focus:border-[#A8BA80] transition-colors resize-none"
                   />
                 </div>
               )}

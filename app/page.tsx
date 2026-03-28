@@ -26,7 +26,7 @@ const tools = [
   { href: "/compress",  icon: Minimize2,  label: "Compress PDF",    description: "Reduce file size without losing quality." },
   { href: "/convert/image", icon: Image,  label: "PDF to Image",    description: "Convert each page to PNG or JPEG." },
   { href: "/watermark", icon: Stamp,      label: "Watermark",       description: "Add a text or image watermark to your PDF." },
-  { href: "/protect",   icon: Lock,       label: "Protect & Unlock",description: "Password-protect or unlock a PDF file." },
+  { href: "/protect",   icon: Lock,       label: "Protect",         description: "Password-protect a PDF file." },
   { href: "/extract",   icon: FileText,   label: "Extract Text",    description: "Pull all text content out of any PDF." },
 ];
 

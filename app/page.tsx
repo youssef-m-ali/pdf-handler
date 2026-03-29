@@ -6,6 +6,7 @@ import {
   LayoutGrid,
   Minimize2,
   Image,
+  Images,
   Stamp,
   Lock,
   FileText,
@@ -27,7 +28,8 @@ const tools = [
   { href: "/convert/image", icon: Image,  label: "PDF to Image",    description: "Convert each page to PNG or JPEG." },
   { href: "/watermark", icon: Stamp,      label: "Watermark",       description: "Add a text or image watermark to your PDF." },
   { href: "/protect",   icon: Lock,       label: "Protect",         description: "Password-protect a PDF file." },
-  { href: "/extract",   icon: FileText,   label: "Extract Text",    description: "Pull all text content out of any PDF." },
+  { href: "/extract",        icon: FileText, label: "Extract Text",   description: "Pull all text content out of any PDF." },
+  { href: "/extract/images", icon: Images,   label: "Extract Images", description: "Pull all embedded images out of a PDF as a ZIP." },
 ];
 
 export default function HomePage() {

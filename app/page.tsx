@@ -72,15 +72,15 @@ export default function HomePage() {
               style={{ background: "#EDF0E6", borderColor: "#C8D4A8", color: "#5C6B3A" }}
             >
               <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "#7A8F4E" }} />
-              100% client-side · your files never leave your device
+              Privacy-first · no file storage · free & open source
             </div>
             <h1 className="text-5xl sm:text-6xl font-bold leading-tight mb-5 text-gray-900">
               PDF tools that{" "}
               <span style={{ color: "#5C6B3A" }}>respect your privacy</span>
             </h1>
             <p className="text-lg mb-10 max-w-xl mx-auto leading-relaxed" style={{ color: "#6B7355" }}>
-              Merge, split, compress, and edit PDFs without uploading anything.
-              Everything runs locally — fast, free, and open source.
+              Merge, split, compress, convert, and edit PDFs.
+              Fast, free, and open source — your files are never stored.
             </p>
             <a
               href="#tools"
@@ -132,9 +132,9 @@ export default function HomePage() {
         <section className="py-14 px-6 border-t border-gray-100" style={{ background: "#F5F6F0" }}>
           <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-center gap-10 sm:gap-20 text-center">
             {[
-              { stat: "100%", label: "Client-side processing" },
-              { stat: "0",    label: "Files uploaded to any server" },
-              { stat: "Free", label: "No account, no limits" },
+              { stat: "0",    label: "Files stored on any server" },
+              { stat: "0",    label: "Accounts required" },
+              { stat: "Free", label: "No limits, no paywalls" },
             ].map(({ stat, label }) => (
               <div key={label} className="flex flex-col gap-1">
                 <span className="text-3xl font-bold" style={{ color: "#5C6B3A" }}>{stat}</span>

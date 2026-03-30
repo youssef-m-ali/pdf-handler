@@ -22,7 +22,7 @@ import {
   rectSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, degrees } from "pdf-lib";
 import {
   ArrowLeft,
   UploadCloud,
@@ -31,6 +31,7 @@ import {
   Download,
   Loader2,
   RotateCw,
+  RotateCcw,
   ArrowDownAZ,
 } from "lucide-react";
 
@@ -42,6 +43,7 @@ interface PdfFile {
   pageCount: number | null;
   thumbnail: string | null;   // data-URL, null while loading or on failure
   thumbLoading: boolean;
+  rotation: number;           // 0 | 90 | 180 | 270 — applied to all pages during merge
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -90,13 +92,19 @@ async function generateThumbnail(file: File): Promise<string | null> {
   }
 }
 
-async function mergePdfs(files: File[]): Promise<Uint8Array> {
+async function mergePdfs(files: PdfFile[]): Promise<Uint8Array> {
   const merged = await PDFDocument.create();
-  for (const file of files) {
+  for (const { file, rotation } of files) {
     const buf = await file.arrayBuffer();
     const pdf = await PDFDocument.load(buf);
     const copied = await merged.copyPages(pdf, pdf.getPageIndices());
-    copied.forEach((p) => merged.addPage(p));
+    copied.forEach((p) => {
+      if (rotation !== 0) {
+        const existing = p.getRotation().angle;
+        p.setRotation(degrees((existing + rotation) % 360));
+      }
+      merged.addPage(p);
+    });
   }
   return merged.save();
 }
@@ -107,13 +115,16 @@ function PdfCard({
   item,
   index,
   onRemove,
+  onRotate,
   isDragging = false,
 }: {
   item: PdfFile;
   index: number;
   onRemove?: (id: string) => void;
+  onRotate?: (id: string, delta: 90 | -90) => void;
   isDragging?: boolean;
 }) {
+  const thumbScale = item.rotation % 180 !== 0 ? 0.72 : 1;
   return (
     // Outer wrapper — `relative` so we can absolutely position the info pill above the card
     <div className="group relative flex flex-col select-none">
@@ -150,6 +161,10 @@ function PdfCard({
               alt={item.file.name}
               className="w-full h-full object-contain"
               draggable={false}
+              style={{
+                transform: `rotate(${item.rotation}deg) scale(${thumbScale})`,
+                transition: "transform 0.2s ease",
+              }}
             />
           </div>
         ) : (
@@ -159,27 +174,40 @@ function PdfCard({
         )}
 
         {/* Action buttons — top-right, visible on hover */}
-        {onRemove && (
+        {(onRemove || onRotate) && (
           <div
             className="absolute top-2 right-2 flex gap-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
             onPointerDown={(e) => e.stopPropagation()}
           >
-            {/* TODO: wire up rotation once the rotate feature is implemented */}
-            <button
-              disabled
-              className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm opacity-50 cursor-not-allowed"
-              aria-label="Rotate (coming soon)"
-              title="Rotate (coming soon)"
-            >
-              <RotateCw className="w-3 h-3 text-gray-600" />
-            </button>
-            <button
-              onClick={() => onRemove(item.id)}
-              className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm hover:bg-white transition-colors"
-              aria-label="Remove file"
-            >
-              <X className="w-3 h-3 text-gray-600" />
-            </button>
+            {onRotate && (
+              <>
+                <button
+                  onClick={() => onRotate(item.id, -90)}
+                  className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm hover:bg-white transition-colors"
+                  aria-label="Rotate counter-clockwise"
+                  title="Rotate left"
+                >
+                  <RotateCcw className="w-3 h-3 text-gray-600" />
+                </button>
+                <button
+                  onClick={() => onRotate(item.id, 90)}
+                  className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm hover:bg-white transition-colors"
+                  aria-label="Rotate clockwise"
+                  title="Rotate right"
+                >
+                  <RotateCw className="w-3 h-3 text-gray-600" />
+                </button>
+              </>
+            )}
+            {onRemove && (
+              <button
+                onClick={() => onRemove(item.id)}
+                className="w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm hover:bg-white transition-colors"
+                aria-label="Remove file"
+              >
+                <X className="w-3 h-3 text-gray-600" />
+              </button>
+            )}
           </div>
         )}
 
@@ -206,10 +234,12 @@ function SortableCard({
   item,
   index,
   onRemove,
+  onRotate,
 }: {
   item: PdfFile;
   index: number;
   onRemove: (id: string) => void;
+  onRotate: (id: string, delta: 90 | -90) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: item.id });
@@ -220,13 +250,13 @@ function SortableCard({
       style={{
         transform: CSS.Transform.toString(transform),
         transition,
-        opacity: isDragging ? 0 : 1, // hide original while dragging (overlay shows instead)
+        opacity: isDragging ? 0 : 1,
       }}
       className="cursor-grab active:cursor-grabbing"
       {...attributes}
       {...listeners}
     >
-      <PdfCard item={item} index={index} onRemove={onRemove} />
+      <PdfCard item={item} index={index} onRemove={onRemove} onRotate={onRotate} />
     </div>
   );
 }
@@ -257,6 +287,7 @@ export default function MergeClient() {
       pageCount: null,
       thumbnail: null,
       thumbLoading: true,
+      rotation: 0,
     }));
 
     setFiles((prev) => [...prev, ...placeholders]);
@@ -299,6 +330,14 @@ export default function MergeClient() {
     }
   }
 
+  // ── Rotate ───────────────────────────────────────────────────────────────
+  function rotateFile(id: string, delta: 90 | -90) {
+    setDownloadUrl(null);
+    setFiles((prev) =>
+      prev.map((f) => f.id === id ? { ...f, rotation: (f.rotation + delta + 360) % 360 } : f)
+    );
+  }
+
   // ── Merge ────────────────────────────────────────────────────────────────
   async function handleMerge() {
     if (files.length < 2) return;
@@ -306,7 +345,7 @@ export default function MergeClient() {
     setError(null);
     setDownloadUrl(null);
     try {
-      const bytes = await mergePdfs(files.map((f) => f.file));
+      const bytes = await mergePdfs(files);
       const blob = new Blob([bytes as unknown as BlobPart], { type: "application/pdf" });
       setDownloadUrl(URL.createObjectURL(blob));
     } catch (err) {
@@ -439,6 +478,7 @@ export default function MergeClient() {
                           setFiles((prev) => prev.filter((f) => f.id !== id));
                           setDownloadUrl(null);
                         }}
+                        onRotate={rotateFile}
                       />
                     ))}
                   </div>

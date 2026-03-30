@@ -23,61 +23,18 @@ function formatBytes(bytes: number): string {
 
 // ─── Core functions ───────────────────────────────────────────────────────────
 
-async function extractTextPages(file: File): Promise<{ pageNum: number; text: string }[]> {
-  const pdfjsLib = await import("pdfjs-dist");
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+async function convertViaApi(file: File): Promise<Blob> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch("/api/pdf-to-word", { method: "POST", body: form });
+  if (!res.ok) {
+    const { error } = await res.json().catch(() => ({ error: "Conversion failed" }));
+    throw new Error(error);
   }
-  const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
-  const pages: { pageNum: number; text: string }[] = [];
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const text = content.items
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .map((item: any) => ("str" in item ? item.str : ""))
-      .join(" ")
-      .replace(/ {2,}/g, " ")
-      .trim();
-    pages.push({ pageNum: i, text });
-  }
-  return pages;
+  return res.blob();
 }
 
-async function buildAndDownloadDocx(
-  pages: { pageNum: number; text: string }[],
-  filename: string
-) {
-  const { Document, Packer, Paragraph, TextRun, HeadingLevel } = await import("docx");
-  const totalPages = pages.length;
-  const children: InstanceType<typeof Paragraph>[] = [];
-
-  for (const { pageNum, text } of pages) {
-    if (totalPages > 1) {
-      children.push(
-        new Paragraph({ text: `Page ${pageNum}`, heading: HeadingLevel.HEADING_2 })
-      );
-    }
-    if (text) {
-      children.push(new Paragraph({ children: [new TextRun(text)] }));
-    } else {
-      children.push(
-        new Paragraph({
-          children: [
-            new TextRun({ text: "[No text on this page]", italics: true, color: "999999" }),
-          ],
-        })
-      );
-    }
-    // Page break between pages (not after last)
-    if (pageNum < totalPages) {
-      children.push(new Paragraph({ pageBreakBefore: true, text: "" }));
-    }
-  }
-
-  const doc = new Document({ sections: [{ children }] });
-  const blob = await Packer.toBlob(doc);
+function triggerBlobDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -88,16 +45,17 @@ async function buildAndDownloadDocx(
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ExtractClient() {
-  const [file, setFile]             = useState<File | null>(null);
+  const [file, setFile]                 = useState<File | null>(null);
   const [isConverting, setIsConverting] = useState(false);
-  const [done, setDone]             = useState(false);
+  const [done, setDone]                 = useState(false);
+  const [docxBlob, setDocxBlob]         = useState<Blob | null>(null);
   const [docxFilename, setDocxFilename] = useState("");
-  const [error, setError]           = useState<string | null>(null);
+  const [error, setError]               = useState<string | null>(null);
 
-  const reset = () => { setFile(null); setDone(false); setError(null); };
+  const reset = () => { setFile(null); setDone(false); setDocxBlob(null); setError(null); };
 
   const onDrop = useCallback((accepted: File[]) => {
-    if (accepted[0]) { setFile(accepted[0]); setDone(false); setError(null); }
+    if (accepted[0]) { setFile(accepted[0]); setDone(false); setDocxBlob(null); setError(null); }
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -112,10 +70,11 @@ export default function ExtractClient() {
     setError(null);
     setDone(false);
     try {
-      const pages = await extractTextPages(file);
       const name = file.name.replace(/\.pdf$/i, "") + ".docx";
+      const blob = await convertViaApi(file);
+      setDocxBlob(blob);
       setDocxFilename(name);
-      await buildAndDownloadDocx(pages, name);
+      triggerBlobDownload(blob, name);
       setDone(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Conversion failed.");
@@ -202,7 +161,7 @@ export default function ExtractClient() {
               <p className="font-semibold text-gray-900 text-sm">Conversion complete</p>
             </div>
             <button
-              onClick={() => file && extractTextPages(file).then((pages) => buildAndDownloadDocx(pages, docxFilename))}
+              onClick={() => docxBlob && triggerBlobDownload(docxBlob, docxFilename)}
               className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-white text-sm"
               style={{ background: "#5C6B3A" }}
             >

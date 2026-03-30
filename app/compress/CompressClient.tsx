@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { PDFDocument } from "pdf-lib";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import {
@@ -42,65 +41,21 @@ function triggerDownload(bytes: Uint8Array, filename: string) {
   a.click();
 }
 
-async function compressRasterize(file: File): Promise<Uint8Array> {
-  const pdfjsLib = await import("pdfjs-dist");
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+async function compressViaApi(file: File, level: string): Promise<CompressResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("level", level);
+  const res = await fetch("/api/compress", { method: "POST", body: form });
+  if (!res.ok) {
+    const { error } = await res.json().catch(() => ({ error: "Compression failed" }));
+    throw new Error(error);
   }
-
-  const buf = await file.arrayBuffer();
-  const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
-  const out = await PDFDocument.create();
-
-  for (let i = 1; i <= pdfDoc.numPages; i++) {
-    const page = await pdfDoc.getPage(i);
-    const viewport = page.getViewport({ scale: 1 }); // 72 DPI
-
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(viewport.width);
-    canvas.height = Math.round(viewport.height);
-
-    await page.render({ canvasContext: canvas.getContext("2d")! as CanvasRenderingContext2D, viewport }).promise;
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.35);
-    const imageBytes = Uint8Array.from(atob(dataUrl.split(",")[1]), (c) => c.charCodeAt(0));
-    const jpegImage = await out.embedJpg(imageBytes);
-
-    const pdfPage = out.addPage([viewport.width, viewport.height]);
-    pdfPage.drawImage(jpegImage, { x: 0, y: 0, width: viewport.width, height: viewport.height });
-  }
-
-  return out.save({ useObjectStreams: true });
-}
-
-// Each call gets a fresh Ghostscript instance; the WASM binary is cached by
-// the browser after the first download (~18 MB).
-async function compressWithGhostscript(
-  file: File,
-  pdfsettings: string
-): Promise<Uint8Array> {
-  const { default: Module } = await import("@jspawn/ghostscript-wasm");
-  const gs = await Module({
-    locateFile: (path: string) =>
-      `https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/${path}`,
-  });
-
-  const buf = await file.arrayBuffer();
-  gs.FS.writeFile("/input.pdf", new Uint8Array(buf));
-
-  gs.callMain([
-    "-sDEVICE=pdfwrite",
-    "-dCompatibilityLevel=1.4",
-    `-dPDFSETTINGS=${pdfsettings}`,
-    "-dNOPAUSE",
-    "-dQUIET",
-    "-dBATCH",
-    "-sOutputFile=/output.pdf",
-    "/input.pdf",
-  ]);
-
-  const result: Uint8Array = gs.FS.readFile("/output.pdf");
-  return result;
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return {
+    bytes,
+    originalSize: Number(res.headers.get("X-Original-Size")) || file.size,
+    compressedSize: Number(res.headers.get("X-Compressed-Size")) || bytes.byteLength,
+  };
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -127,8 +82,8 @@ const LEVELS: {
   {
     id: "maximum",
     label: "Maximum",
-    desc: "Rasterizes pages at 72 DPI. Smallest file size.",
-    warning: "Text becomes non-searchable.",
+    desc: "Screen quality (72 DPI images). Most aggressive compression. Text stays searchable.",
+    pdfsettings: "/screen",
   },
 ];
 
@@ -168,10 +123,8 @@ export default function CompressClient() {
     setResult(null);
 
     try {
-      const bytes = level === "maximum"
-        ? await compressRasterize(file)
-        : await compressWithGhostscript(file, LEVELS.find((l) => l.id === level)!.pdfsettings!);
-      setResult({ bytes, originalSize: file.size, compressedSize: bytes.byteLength });
+      const result = await compressViaApi(file, level);
+      setResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Compression failed.");
     } finally {
@@ -213,10 +166,7 @@ export default function CompressClient() {
             <h1 className="text-xl font-semibold text-gray-900">Compress PDF</h1>
           </div>
           <p className="text-sm pl-[42px]" style={{ color: "#6B7355" }}>
-            Reduce file size — powered by Ghostscript, runs locally in your browser.
-          </p>
-          <p className="text-xs pl-[42px]" style={{ color: "#A8BA80" }}>
-            First run downloads the compression engine (~18 MB). Subsequent runs are instant.
+            Reduce file size — powered by Ghostscript, processed on the server.
           </p>
         </div>
 

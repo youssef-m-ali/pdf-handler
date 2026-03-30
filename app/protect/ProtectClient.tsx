@@ -33,42 +33,25 @@ function triggerDownload(bytes: Uint8Array, filename: string) {
   a.click();
 }
 
-async function protectPdf(
+async function protectViaApi(
   file: File,
   userPassword: string,
   ownerPassword: string,
   allowPrinting: boolean,
   allowCopying: boolean,
 ): Promise<Uint8Array> {
-  const { default: Module } = await import("@jspawn/ghostscript-wasm");
-  const gs = await Module({
-    locateFile: (path: string) =>
-      `https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/${path}`,
-  });
-
-  const buf = await file.arrayBuffer();
-  gs.FS.writeFile("/input.pdf", new Uint8Array(buf));
-
-  // PDF permission bits: 4 = print, 2048 = high-res print, 16 = copy
-  let permissions = 0;
-  if (allowPrinting) permissions |= 4 | 2048;
-  if (allowCopying)  permissions |= 16;
-
-  gs.callMain([
-    "-sDEVICE=pdfwrite",
-    "-dNOPAUSE",
-    "-dQUIET",
-    "-dBATCH",
-    `-sOwnerPassword=${ownerPassword || userPassword}`,
-    `-sUserPassword=${userPassword}`,
-    "-dEncryptionR=3",
-    "-dKeyLength=128",
-    `-dPermissions=${permissions}`,
-    "-sOutputFile=/output.pdf",
-    "/input.pdf",
-  ]);
-
-  return gs.FS.readFile("/output.pdf");
+  const form = new FormData();
+  form.append("file", file);
+  form.append("userPassword", userPassword);
+  form.append("ownerPassword", ownerPassword);
+  form.append("allowPrinting", String(allowPrinting));
+  form.append("allowCopying", String(allowCopying));
+  const res = await fetch("/api/protect", { method: "POST", body: form });
+  if (!res.ok) {
+    const { error } = await res.json().catch(() => ({ error: "Protection failed" }));
+    throw new Error(error);
+  }
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 // ─── Password input ───────────────────────────────────────────────────────────
@@ -144,7 +127,7 @@ export default function ProtectClient() {
     setError(null);
     setResult(null);
     try {
-      const bytes = await protectPdf(file, userPassword, ownerPassword, allowPrinting, allowCopying);
+      const bytes = await protectViaApi(file, userPassword, ownerPassword, allowPrinting, allowCopying);
       setResult(bytes);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

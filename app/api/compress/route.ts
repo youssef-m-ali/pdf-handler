@@ -33,13 +33,44 @@ export async function POST(req: NextRequest) {
     const pdfsettings =
       level === "light" ? "/printer" : level === "balanced" ? "/ebook" : "/screen";
 
-    gs.callMain([
+    // Common args shared across all levels
+    const commonArgs = [
       "-sDEVICE=pdfwrite",
       "-dCompatibilityLevel=1.4",
       `-dPDFSETTINGS=${pdfsettings}`,
       "-dNOPAUSE",
       "-dQUIET",
       "-dBATCH",
+      "-dOptimize=true",
+      "-dDetectDuplicateImages=true",
+      "-dSubsetFonts=true",
+      "-dCompressFonts=true",
+      // Force GS to re-encode images instead of passing through DCT streams untouched
+      "-dAutoFilterColorImages=false",
+      "-dColorImageFilter=/DCTEncode",
+      "-dAutoFilterGrayImages=false",
+      "-dGrayImageFilter=/DCTEncode",
+      "-dDownsampleColorImages=true",
+      "-dColorImageDownsampleType=/Bicubic",
+      "-dDownsampleGrayImages=true",
+      "-dGrayImageDownsampleType=/Bicubic",
+      "-dDownsampleMonoImages=true",
+      "-dMonoImageDownsampleType=/Subsample",
+    ];
+
+    // Light: printer quality (300 DPI), strip fonts — biggest gap vs ILP was fonts + image passthrough
+    const lightArgs = [
+      "-dColorImageResolution=300",
+      "-dGrayImageResolution=300",
+      "-dMonoImageResolution=600",
+      "-dEmbedAllFonts=false",
+    ];
+
+    const extraArgs = level === "light" ? lightArgs : [];
+
+    gs.callMain([
+      ...commonArgs,
+      ...extraArgs,
       "-sOutputFile=/output.pdf",
       "/input.pdf",
     ]);

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import path from "path";
 
 export const maxDuration = 60;
 
@@ -18,7 +19,17 @@ export async function POST(req: NextRequest) {
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { default: Module } = await import("@jspawn/ghostscript-wasm");
-    const gs = await Module();
+    const wasmPath = path.join(process.cwd(), "node_modules/@jspawn/ghostscript-wasm/gs.wasm");
+    const wasmBuffer = await import("fs").then(fs => fs.promises.readFile(wasmPath));
+    const gs = await Module({
+      instantiateWasm(
+        imports: WebAssembly.Imports,
+        successCallback: (instance: WebAssembly.Instance) => void
+      ) {
+        WebAssembly.instantiate(wasmBuffer, imports).then(r => successCallback(r.instance));
+        return {};
+      },
+    });
 
     gs.FS.writeFile("/input.pdf", new Uint8Array(buf));
 

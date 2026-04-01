@@ -1131,8 +1131,6 @@ def print_comparison(analyses: list):
 def main():
     parser = argparse.ArgumentParser(description="Deep PDF analysis and comparison tool")
     parser.add_argument("pdfs", nargs="+", metavar="PDF", help="PDF files to analyze/compare")
-    parser.add_argument("--labels", nargs="+", metavar="LABEL",
-                        help="Labels for each PDF (default: filenames)")
     parser.add_argument("--json", metavar="FILE",
                         help="Also write full analysis data to a JSON file")
     args = parser.parse_args()
@@ -1142,9 +1140,7 @@ def main():
         if not p.exists():
             sys.exit(f"File not found: {p}")
 
-    labels = args.labels or [p.name for p in paths]
-    if len(labels) < len(paths):
-        labels += [p.name for p in paths[len(labels):]]
+    labels = [p.name for p in paths]
 
     console.print()
     console.print("[bold]PDF Analyzer[/bold] — loading files...")

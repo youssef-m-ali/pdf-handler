@@ -13,6 +13,7 @@
     "@dnd-kit/sortable": "^8.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@jspawn/ghostscript-wasm": "^0.0.2",
+    "@types/sharp": "^0.31.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "docx": "^9.6.1",
@@ -25,6 +26,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-dropzone": "^14.3.5",
+    "sharp": "^0.34.5",
     "tailwind-merge": "^2.6.0",
     "zustand": "^5.0.3"
   },

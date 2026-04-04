@@ -83,6 +83,9 @@ class ImageInfo:
     dpi_y: Optional[float]
     jpeg_quality: Optional[int]
     has_soft_mask: bool
+    smask_width: Optional[int]           # pixel width of SMask object
+    smask_height: Optional[int]          # pixel height of SMask object
+    smask_dimension_mismatch: bool       # True if SMask exists but dims don't match parent
     image_mask: bool         # 1-bit stencil mask
     interpolate: bool
     inline_count: int        # how many times used inline (rare)
@@ -122,6 +125,7 @@ class PDFAnalysis:
     pages: list              # list[PageInfo]
     images: list             # list[ImageInfo]
     fonts: list              # list[FontInfo]
+    warnings: list           # list of integrity warning strings
     # Aggregates
     total_image_bytes_compressed: int
     total_image_bytes_uncompressed: int
@@ -411,6 +415,25 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
             has_smask = '/SMask' in sd
             interpolate = str(sd.get('/Interpolate', 'false')).lower() == 'true'
 
+            # SMask dimension lookup
+            smask_width = None
+            smask_height = None
+            smask_mismatch = False
+            if has_smask:
+                try:
+                    smask_ref = sd.get('/SMask')
+                    if smask_ref is not None and hasattr(smask_ref, 'objgen'):
+                        smask_obj = pdf.get_object(smask_ref.objgen)
+                        if hasattr(smask_obj, 'stream_dict'):
+                            smask_sd = smask_obj.stream_dict
+                            smask_width = int(smask_sd.get('/Width', 0)) or None
+                            smask_height = int(smask_sd.get('/Height', 0)) or None
+                            if smask_width is not None and smask_height is not None:
+                                if smask_width != w or smask_height != h:
+                                    smask_mismatch = True
+                except Exception:
+                    pass
+
             # Stream sizes
             compressed_bytes = 0
             uncompressed_bytes = -1
@@ -456,6 +479,9 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                 dpi_y=None,
                 jpeg_quality=jpeg_quality,
                 has_soft_mask=has_smask,
+                smask_width=smask_width,
+                smask_height=smask_height,
+                smask_dimension_mismatch=smask_mismatch,
                 image_mask=has_mask,
                 interpolate=interpolate,
                 inline_count=0,
@@ -663,6 +689,31 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
     images_list  = list(image_by_objid.values())
     fonts_list   = list(font_by_objid.values())
 
+    # ── Integrity checks ──────────────────────────────────────────────────────
+    integrity_warnings = []
+    for img in images_list:
+        if img.compressed_bytes > 0 and img.uncompressed_bytes >= 1000 and \
+                img.compressed_bytes > img.uncompressed_bytes:
+            ratio = img.compressed_bytes / img.uncompressed_bytes
+            integrity_warnings.append(
+                f"Object {img.object_id}: impossible compression ratio {ratio:.2f}x "
+                f"(compressed {fmt_bytes(img.compressed_bytes)} > uncompressed {fmt_bytes(img.uncompressed_bytes)})"
+            )
+        if img.compressed_bytes == 0 and img.width_px > 0 and img.height_px > 0 and not img.image_mask:
+            integrity_warnings.append(
+                f"Object {img.object_id}: zero-byte image stream (stripped?) "
+                f"for {img.width_px}×{img.height_px} image"
+            )
+        if img.bits_per_component not in (1, 8, 16) and img.bits_per_component > 0:
+            integrity_warnings.append(
+                f"Object {img.object_id}: unusual BitsPerComponent={img.bits_per_component}"
+            )
+        if img.smask_dimension_mismatch:
+            integrity_warnings.append(
+                f"Object {img.object_id}: SMask dimensions {img.smask_width}×{img.smask_height} "
+                f"don't match image {img.width_px}×{img.height_px} — Acrobat will error"
+            )
+
     # Aggregates
     total_img_comp   = sum(i.compressed_bytes for i in images_list)
     total_img_uncomp = sum(i.uncompressed_bytes for i in images_list if i.uncompressed_bytes > 0)
@@ -694,6 +745,7 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
         pages=pages_info,
         images=images_list,
         fonts=fonts_list,
+        warnings=integrity_warnings,
         total_image_bytes_compressed=total_img_comp,
         total_image_bytes_uncompressed=total_img_uncomp,
         total_font_bytes=total_font,
@@ -730,6 +782,12 @@ def bool_str(v: bool) -> str:
 
 def nullable(v, fmt=str, none_str="—") -> str:
     return none_str if v is None else fmt(v)
+
+def fmt_filters(img: "ImageInfo") -> str:
+    """Show filter chain as FlateDecode+DCTDecode for array filters."""
+    if len(img.all_filters) > 1:
+        return "+".join(img.all_filters)
+    return img.primary_filter or "None"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -796,23 +854,42 @@ def print_single(analysis: PDFAnalysis):
         for img in sorted(analysis.images, key=lambda x: (x.pages[0] if x.pages else 0, x.object_id)):
             dpi_str = f"{img.dpi_x:.0f}×{img.dpi_y:.0f}" if img.dpi_x else "—"
             ratio_str = f"{img.compression_ratio:.3f}" if img.compression_ratio > 0 else "—"
+            # SMask column: show dimensions and flag mismatches
+            if not img.has_soft_mask:
+                smask_str = ""
+            elif img.smask_dimension_mismatch:
+                smask_str = f"[bold red]{img.smask_width}×{img.smask_height} ✗[/bold red]"
+            elif img.smask_width is not None:
+                smask_str = f"{img.smask_width}×{img.smask_height}"
+            else:
+                smask_str = "✓"
             it.add_row(
                 img.object_id,
                 ",".join(str(p) for p in img.pages) or "?",
                 f"{img.width_px}×{img.height_px}",
                 img.color_space,
                 str(img.bits_per_component),
-                img.primary_filter,
+                fmt_filters(img),
                 str(img.jpeg_quality) if img.jpeg_quality else "—",
                 dpi_str,
                 fmt_bytes(img.compressed_bytes),
                 fmt_bytes(img.uncompressed_bytes),
                 ratio_str,
-                "✓" if img.has_soft_mask else "",
+                smask_str,
                 "✓" if img.image_mask else "",
                 "✓" if img.interpolate else "",
             )
         console.print(it)
+
+    # Integrity warnings panel
+    if analysis.warnings:
+        lines = []
+        for w in analysis.warnings:
+            if "Acrobat" in w or "impossible" in w or "zero-byte" in w:
+                lines.append(f"[bold red]⚠ {w}[/bold red]")
+            else:
+                lines.append(f"[yellow]⚠ {w}[/yellow]")
+        console.print(Panel("\n".join(lines), title="[bold yellow]⚠ Integrity Warnings[/bold yellow]", expand=False))
 
     # Per-font table
     if analysis.fonts:
@@ -998,7 +1075,7 @@ def print_comparison(analyses: list):
         img_metric_row("Bits/component",
             lambda img: str(img.bits_per_component), highlight=True)
         img_metric_row("Filter",
-            lambda img: img.primary_filter, highlight=True)
+            lambda img: fmt_filters(img), highlight=True)
         img_metric_row("JPEG quality",
             lambda img: str(img.jpeg_quality) if img.jpeg_quality else "—", highlight=True)
         img_metric_row("DPI",
@@ -1011,6 +1088,88 @@ def print_comparison(analyses: list):
         img_metric_row("Interpolate",     lambda img: "yes" if img.interpolate else "no")
 
         console.print(it)
+
+    # ── Per-image delta table ─────────────────────────────────────────────────
+    for analysis in rest:
+        comp_lookup = build_img_lookup(analysis)
+        delta_rows = []
+        for key in sorted(all_keys):
+            orig_img = lookups[0].get(key)
+            comp_img = comp_lookup.get(key)
+            if not orig_img or not comp_img:
+                continue
+            # Skip images with no meaningful changes
+            dims_changed = (orig_img.width_px != comp_img.width_px or
+                            orig_img.height_px != comp_img.height_px)
+            filter_changed = fmt_filters(orig_img) != fmt_filters(comp_img)
+            q_changed = (orig_img.jpeg_quality != comp_img.jpeg_quality and
+                         (orig_img.jpeg_quality is not None or comp_img.jpeg_quality is not None))
+            bytes_changed = orig_img.compressed_bytes != comp_img.compressed_bytes
+            smask_issue = comp_img.smask_dimension_mismatch
+            if not any([dims_changed, filter_changed, q_changed, bytes_changed, smask_issue]):
+                continue
+            delta_rows.append((key, orig_img, comp_img))
+
+        if delta_rows:
+            dt = Table(
+                title=f"Per-Image Delta: [bold]{orig.label}[/bold] → [bold]{analysis.label}[/bold]",
+                box=box.SIMPLE_HEAD, show_lines=False
+            )
+            for col in ["Pg", "Orig dims", "New dims", "Orig filter", "New filter",
+                        "Orig Q", "New Q", "Orig bytes", "New bytes", "Δ bytes", "SMask"]:
+                dt.add_column(col, justify="right" if col not in ("Orig filter", "New filter") else "left")
+
+            for (page_num, order), orig_img, comp_img in delta_rows:
+                dims_orig = f"{orig_img.width_px}×{orig_img.height_px}"
+                dims_new = f"{comp_img.width_px}×{comp_img.height_px}"
+                if dims_orig == dims_new:
+                    dims_new = "="
+                else:
+                    dims_new = f"[yellow]{dims_new}[/yellow]"
+
+                filt_orig = fmt_filters(orig_img)
+                filt_new = fmt_filters(comp_img)
+                if filt_orig == filt_new:
+                    filt_new = "="
+                else:
+                    filt_new = f"[yellow]{filt_new}[/yellow]"
+
+                q_orig = f"Q{orig_img.jpeg_quality}" if orig_img.jpeg_quality else "—"
+                q_new = f"Q{comp_img.jpeg_quality}" if comp_img.jpeg_quality else "—"
+                if q_orig == q_new:
+                    q_new = "="
+                elif comp_img.jpeg_quality and orig_img.jpeg_quality and \
+                        comp_img.jpeg_quality < orig_img.jpeg_quality:
+                    q_new = f"[yellow]{q_new}[/yellow]"
+
+                ob = orig_img.compressed_bytes
+                nb = comp_img.compressed_bytes
+                delta = nb - ob
+                if ob > 0:
+                    pct = delta / ob * 100
+                    sign = "+" if delta > 0 else "-" if delta < 0 else ""
+                    color = "green" if delta < 0 else "red" if delta > 0 else "white"
+                    delta_str = f"[{color}]{sign}{fmt_bytes(abs(delta))} ({sign}{abs(pct):.0f}%)[/{color}]"
+                else:
+                    delta_str = "—"
+
+                if not comp_img.has_soft_mask:
+                    smask_ok = "—"
+                elif comp_img.smask_dimension_mismatch:
+                    smask_ok = "[bold red]✗[/bold red]"
+                else:
+                    smask_ok = "[green]✓[/green]"
+
+                dt.add_row(
+                    str(page_num),
+                    dims_orig, dims_new,
+                    filt_orig, filt_new,
+                    q_orig, q_new,
+                    fmt_bytes(ob), fmt_bytes(nb),
+                    delta_str,
+                    smask_ok,
+                )
+            console.print(dt)
 
     # ── Font comparison ───────────────────────────────────────────────────────
     console.rule("[bold cyan]Font Comparison[/bold cyan]")
@@ -1105,6 +1264,25 @@ def print_comparison(analyses: list):
             flt_desc = [f"{o}→{c}" for _, o, c in img_filter_changed]
             findings.append(f"✓ Changed image filter on {len(img_filter_changed)} image(s): {', '.join(flt_desc[:3])}")
 
+        # SMask dimension mismatches — deduplicated by object_id, sourced from all images
+        smask_mismatches = [img for img in analysis.images if img.smask_dimension_mismatch]
+        if smask_mismatches:
+            ids = ", ".join(img.object_id for img in smask_mismatches[:5])
+            findings.append(
+                f"[bold red]✗ SMask dimension mismatch on {len(smask_mismatches)} image(s): "
+                f"{ids} — Acrobat will error[/bold red]"
+            )
+            for img in smask_mismatches:
+                findings.append(
+                    f"[red]  Object {img.object_id}: SMask {img.smask_width}×{img.smask_height} "
+                    f"≠ image {img.width_px}×{img.height_px}[/red]"
+                )
+
+        # Other integrity warnings (skip SMask ones already listed above)
+        other_warnings = [w for w in analysis.warnings if "SMask" not in w]
+        for w in other_warnings:
+            findings.append(f"[yellow]⚠ {w}[/yellow]")
+
         # Font analysis
         fonts_removed_embed = sum(
             1 for fn, _ in all_font_names
@@ -1167,6 +1345,7 @@ def main():
                 "pages": [asdict(p) for p in a.pages],
                 "images": [asdict(i) for i in a.images],
                 "fonts": [asdict(f) for f in a.fonts],
+                "warnings": a.warnings,
                 "totals": {
                     "image_bytes_compressed": a.total_image_bytes_compressed,
                     "image_bytes_uncompressed": a.total_image_bytes_uncompressed,

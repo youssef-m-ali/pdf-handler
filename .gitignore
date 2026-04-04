@@ -31,3 +31,7 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# PDF files and test output
+files/*.pdf
+scripts/*.json

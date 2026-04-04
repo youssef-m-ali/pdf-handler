@@ -96,10 +96,16 @@ async function recompressImages(
       let imgBuffer: Buffer;
       let newColorSpace: PDFName;
       if (isGray) {
-        imgBuffer = await pipeline.grayscale().jpeg({ quality, mozjpeg: true }).toBuffer();
+        const { data, info } = await pipeline.grayscale().jpeg({ quality, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+        imgBuffer = data;
+        newW = info.width;
+        newH = info.height;
         newColorSpace = PDFName.of("DeviceGray");
       } else {
-        imgBuffer = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
+        const { data, info } = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+        imgBuffer = data;
+        newW = info.width;
+        newH = info.height;
         newColorSpace = PDFName.of("DeviceRGB");
       }
 
@@ -111,9 +117,12 @@ async function recompressImages(
       dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
       dict.set(PDFName.of("Length"),           PDFNumber.of(imgBuffer.length));
       dict.delete(PDFName.of("DecodeParms"));
+      // Always update Width/Height from actual sharp output — sharp may round
+      // dimensions differently than we calculated, and a mismatch causes
+      // "Insufficient data for an image" in Acrobat.
+      dict.set(PDFName.of("Width"),  PDFNumber.of(newW));
+      dict.set(PDFName.of("Height"), PDFNumber.of(newH));
       if (resized) {
-        dict.set(PDFName.of("Width"),  PDFNumber.of(newW));
-        dict.set(PDFName.of("Height"), PDFNumber.of(newH));
         // Record that this image's SMask must be resized to match
         const smask = dict.get(PDFName.of("SMask"));
         if (smask) smaskResizeTargets.set(String(smask), { newW, newH });
@@ -233,7 +242,7 @@ export async function POST(req: NextRequest) {
       level === "light"
         ? await recompressImages(new Uint8Array(buf), 85, Infinity)
         : level === "balanced"
-        ? await recompressImages(new Uint8Array(buf), 80, 1000)
+        ? await recompressImages(new Uint8Array(buf), 70, 1600)
         : await compressWithGS(buf, level);
 
     return new NextResponse(Buffer.from(output), {

@@ -103,6 +103,9 @@ async function recompressImages(
         newColorSpace = PDFName.of("DeviceRGB");
       }
 
+      // Never inflate: skip if re-encoded result is larger than the original stream
+      if (!resized && imgBuffer.length >= obj.contents.byteLength) continue;
+
       dict.set(PDFName.of("Filter"),           PDFName.of("DCTDecode"));
       dict.set(PDFName.of("ColorSpace"),       newColorSpace);
       dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));

@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
       level === "light"
         ? await recompressImages(new Uint8Array(buf), 85, Infinity)
         : level === "balanced"
-        ? await recompressImages(new Uint8Array(buf), 65, 1200)
+        ? await recompressImages(new Uint8Array(buf), 80, 1000)
         : await compressWithGS(buf, level);
 
     return new NextResponse(Buffer.from(output), {

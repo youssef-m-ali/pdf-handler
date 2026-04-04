@@ -11,9 +11,18 @@ const deflateAsync = promisify(deflate);
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
-const inputArg = process.argv[2];
+const args     = process.argv.slice(2).filter(a => !a.startsWith("--"));
+const flags    = process.argv.slice(2).filter(a => a.startsWith("--"));
+const inputArg = args[0];
+const levelArg = flags.find(f => f.startsWith("--level="))?.split("=")[1] ?? null;
+
+const VALID_LEVELS = ["light", "balanced", "extreme"];
 if (!inputArg) {
-  console.error("Usage: node scripts/run_compressions.mjs <path-to-pdf>");
+  console.error("Usage: node scripts/run_compressions.mjs <path-to-pdf> [--level=light|balanced|extreme]");
+  process.exit(1);
+}
+if (levelArg && !VALID_LEVELS.includes(levelArg)) {
+  console.error(`Unknown level "${levelArg}". Choose from: ${VALID_LEVELS.join(", ")}`);
   process.exit(1);
 }
 
@@ -212,11 +221,12 @@ const inputSize = input.byteLength;
 console.log(`\nInput:  ${inputPath}`);
 console.log(`Size:   ${fmt(inputSize)}\n`);
 
-const levels = [
+const allLevels = [
   { name: "light",    out: outLight,    fn: () => recompressImages(new Uint8Array(input), 85, Infinity) },
-  { name: "balanced", out: outBalanced, fn: () => recompressImages(new Uint8Array(input), 65, 1200) },
+  { name: "balanced", out: outBalanced, fn: () => recompressImages(new Uint8Array(input), 80, 1000) },
   { name: "extreme",  out: outExtreme,  fn: () => compressWithGS(input) },
 ];
+const levels = levelArg ? allLevels.filter(l => l.name === levelArg) : allLevels;
 
 for (const { name, out, fn } of levels) {
   process.stdout.write(`  [${name}]    compressing... `);

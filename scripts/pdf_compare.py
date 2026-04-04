@@ -83,6 +83,7 @@ class ImageInfo:
     dpi_x: Optional[float]
     dpi_y: Optional[float]
     jpeg_quality: Optional[int]
+    jpeg_actual_dims: Optional[tuple]    # (w, h) from JPEG SOF header; None if not JPEG
     has_soft_mask: bool
     smask_width: Optional[int]           # pixel width of SMask object
     smask_height: Optional[int]          # pixel height of SMask object
@@ -206,6 +207,38 @@ def estimate_jpeg_quality(jpeg_bytes: bytes) -> Optional[int]:
                 i += 2 + length
         else:
             i += 1
+    return None
+
+
+def jpeg_dimensions(jpeg_bytes: bytes) -> Optional[tuple]:
+    """
+    Parse JPEG SOF marker to extract actual (width, height) from the bitstream.
+    Returns None if no SOF marker found. Catches the dim-mismatch bug where
+    the PDF dict Width/Height differs from the JPEG header.
+    """
+    data = bytes(jpeg_bytes)
+    i = 0
+    while i < len(data) - 3:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        # SOF markers: C0-C3, C5-C7, C9-CB, CD-CF (all Start-of-Frame types)
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            # SOF: length(2) precision(1) height(2) width(2) ...
+            if i + 8 < len(data):
+                h = struct.unpack('>H', data[i + 5:i + 7])[0]
+                w = struct.unpack('>H', data[i + 7:i + 9])[0]
+                return (w, h)
+            return None
+        elif marker in (0xD8, 0xD9):
+            i += 2
+        elif i + 3 < len(data):
+            length = struct.unpack('>H', data[i + 2:i + 4])[0]
+            i += 2 + length
+        else:
+            break
     return None
 
 
@@ -452,7 +485,9 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                     uncompressed_bytes = -1
 
             # JPEG quality — inflate FlateDecode wrapper first if present
+            # Also parse SOF header to catch Width/Height mismatches vs the PDF dict.
             jpeg_quality = None
+            jpeg_actual_dims: Optional[tuple] = None  # (w, h) from JPEG SOF
             if pf == 'DCTDecode':
                 try:
                     import zlib
@@ -460,6 +495,7 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                     if len(filters) > 1 and 'FlateDecode' in filters:
                         raw_bytes = zlib.decompress(raw_bytes)
                     jpeg_quality = estimate_jpeg_quality(raw_bytes)
+                    jpeg_actual_dims = jpeg_dimensions(raw_bytes)
                 except Exception:
                     pass
 
@@ -484,6 +520,7 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                 dpi_x=None,
                 dpi_y=None,
                 jpeg_quality=jpeg_quality,
+                jpeg_actual_dims=jpeg_actual_dims,
                 has_soft_mask=has_smask,
                 smask_width=smask_width,
                 smask_height=smask_height,
@@ -719,6 +756,20 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                 f"Object {img.object_id}: SMask dimensions {img.smask_width}×{img.smask_height} "
                 f"don't match image {img.width_px}×{img.height_px} — Acrobat will error"
             )
+        if img.jpeg_actual_dims is not None:
+            jw, jh = img.jpeg_actual_dims
+            if jw != img.width_px or jh != img.height_px:
+                integrity_warnings.append(
+                    f"Object {img.object_id}: JPEG SOF reports {jw}×{jh} but PDF dict "
+                    f"declares {img.width_px}×{img.height_px} — Acrobat will error"
+                )
+        if img.jpeg_actual_dims is not None:
+            jw, jh = img.jpeg_actual_dims
+            if jw != img.width_px or jh != img.height_px:
+                integrity_warnings.append(
+                    f"Object {img.object_id}: JPEG SOF reports {jw}×{jh} but PDF dict "
+                    f"declares {img.width_px}×{img.height_px} — Acrobat will error"
+                )
 
     # Aggregates
     total_img_comp   = sum(i.compressed_bytes for i in images_list)

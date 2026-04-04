@@ -100,10 +100,12 @@ async function recompressImages(pdfBytes, quality, maxDim) {
 
       let imgBuffer, newColorSpace;
       if (isGray) {
-        imgBuffer = await pipeline.grayscale().jpeg({ quality, mozjpeg: true }).toBuffer();
+        const { data, info } = await pipeline.grayscale().jpeg({ quality, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+        imgBuffer = data; newW = info.width; newH = info.height;
         newColorSpace = PDFName.of("DeviceGray");
       } else {
-        imgBuffer = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
+        const { data, info } = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+        imgBuffer = data; newW = info.width; newH = info.height;
         newColorSpace = PDFName.of("DeviceRGB");
       }
 
@@ -115,9 +117,11 @@ async function recompressImages(pdfBytes, quality, maxDim) {
       dict.set(PDFName.of("BitsPerComponent"), PDFNumber.of(8));
       dict.set(PDFName.of("Length"),           PDFNumber.of(imgBuffer.length));
       dict.delete(PDFName.of("DecodeParms"));
+      // Always write actual sharp output dims — sharp may round differently
+      // than our pre-calculation, causing Acrobat "Insufficient data" errors.
+      dict.set(PDFName.of("Width"),  PDFNumber.of(newW));
+      dict.set(PDFName.of("Height"), PDFNumber.of(newH));
       if (resized) {
-        dict.set(PDFName.of("Width"),  PDFNumber.of(newW));
-        dict.set(PDFName.of("Height"), PDFNumber.of(newH));
         const smask = dict.get(PDFName.of("SMask"));
         if (smask) smaskResizeTargets.set(String(smask), { newW, newH });
       }
@@ -223,7 +227,7 @@ console.log(`Size:   ${fmt(inputSize)}\n`);
 
 const allLevels = [
   { name: "light",    out: outLight,    fn: () => recompressImages(new Uint8Array(input), 85, Infinity) },
-  { name: "balanced", out: outBalanced, fn: () => recompressImages(new Uint8Array(input), 80, 1000) },
+  { name: "balanced", out: outBalanced, fn: () => recompressImages(new Uint8Array(input), 70, 1600) },
   { name: "extreme",  out: outExtreme,  fn: () => compressWithGS(input) },
 ];
 const levels = levelArg ? allLevels.filter(l => l.name === levelArg) : allLevels;

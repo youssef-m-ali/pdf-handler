@@ -79,6 +79,7 @@ class ImageInfo:
     compressed_bytes: int
     uncompressed_bytes: int  # -1 if couldn't decode
     compression_ratio: float
+    bytes_per_pixel: float       # compressed_bytes / (width_px * height_px); quality proxy
     dpi_x: Optional[float]
     dpi_y: Optional[float]
     jpeg_quality: Optional[int]
@@ -450,16 +451,20 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                 if uncompressed_bytes == 0:
                     uncompressed_bytes = -1
 
-            # JPEG quality
+            # JPEG quality — inflate FlateDecode wrapper first if present
             jpeg_quality = None
             if pf == 'DCTDecode':
                 try:
-                    raw_bytes = obj.read_raw_bytes()
-                    jpeg_quality = estimate_jpeg_quality(bytes(raw_bytes))
+                    import zlib
+                    raw_bytes = bytes(obj.read_raw_bytes())
+                    if len(filters) > 1 and 'FlateDecode' in filters:
+                        raw_bytes = zlib.decompress(raw_bytes)
+                    jpeg_quality = estimate_jpeg_quality(raw_bytes)
                 except Exception:
                     pass
 
             ratio = (compressed_bytes / uncompressed_bytes) if uncompressed_bytes > 0 else 0.0
+            bpp = compressed_bytes / (w * h) if w > 0 and h > 0 else 0.0
 
             image_by_objid[objid] = ImageInfo(
                 object_id=objid,
@@ -475,6 +480,7 @@ def analyze_pdf(path: Path, label: str = None) -> PDFAnalysis:
                 compressed_bytes=compressed_bytes,
                 uncompressed_bytes=uncompressed_bytes,
                 compression_ratio=ratio,
+                bytes_per_pixel=bpp,
                 dpi_x=None,
                 dpi_y=None,
                 jpeg_quality=jpeg_quality,
@@ -848,7 +854,7 @@ def print_single(analysis: PDFAnalysis):
     if analysis.images:
         it = Table(title="Per-Image Analysis", box=box.SIMPLE_HEAD, show_lines=False)
         for col in ["ObjID", "Pages", "W×H (px)", "ColorSpace", "BPC", "Filter",
-                    "JPEG Q", "DPI", "Compressed", "Uncompressed", "Ratio",
+                    "JPEG Q", "DPI", "Compressed", "Uncompressed", "Ratio", "B/px",
                     "SMask", "Mask", "Interp"]:
             it.add_column(col)
         for img in sorted(analysis.images, key=lambda x: (x.pages[0] if x.pages else 0, x.object_id)):
@@ -863,6 +869,7 @@ def print_single(analysis: PDFAnalysis):
                 smask_str = f"{img.smask_width}×{img.smask_height}"
             else:
                 smask_str = "✓"
+            bpp_str = f"{img.bytes_per_pixel:.4f}" if img.bytes_per_pixel > 0 else "—"
             it.add_row(
                 img.object_id,
                 ",".join(str(p) for p in img.pages) or "?",
@@ -875,6 +882,7 @@ def print_single(analysis: PDFAnalysis):
                 fmt_bytes(img.compressed_bytes),
                 fmt_bytes(img.uncompressed_bytes),
                 ratio_str,
+                bpp_str,
                 smask_str,
                 "✓" if img.image_mask else "",
                 "✓" if img.interpolate else "",
@@ -1084,6 +1092,8 @@ def print_comparison(analyses: list):
         img_size_row("Uncompressed bytes", lambda img: img.uncompressed_bytes)
         img_metric_row("Ratio",
             lambda img: f"{img.compression_ratio:.3f}" if img.compression_ratio else "—")
+        img_metric_row("Bytes/pixel",
+            lambda img: f"{img.bytes_per_pixel:.4f}" if img.bytes_per_pixel > 0 else "—", highlight=True)
         img_metric_row("Has soft mask",   lambda img: "yes" if img.has_soft_mask else "no")
         img_metric_row("Interpolate",     lambda img: "yes" if img.interpolate else "no")
 
@@ -1116,7 +1126,7 @@ def print_comparison(analyses: list):
                 box=box.SIMPLE_HEAD, show_lines=False
             )
             for col in ["Pg", "Orig dims", "New dims", "Orig filter", "New filter",
-                        "Orig Q", "New Q", "Orig bytes", "New bytes", "Δ bytes", "SMask"]:
+                        "Orig Q", "New Q", "Orig B/px", "New B/px", "Orig bytes", "New bytes", "Δ bytes", "SMask"]:
                 dt.add_column(col, justify="right" if col not in ("Orig filter", "New filter") else "left")
 
             for (page_num, order), orig_img, comp_img in delta_rows:
@@ -1153,6 +1163,17 @@ def print_comparison(analyses: list):
                 else:
                     delta_str = "—"
 
+                bpp_orig = f"{orig_img.bytes_per_pixel:.4f}" if orig_img.bytes_per_pixel > 0 else "—"
+                bpp_new_val = comp_img.bytes_per_pixel
+                if bpp_new_val > 0:
+                    bpp_new = f"{bpp_new_val:.4f}"
+                    if orig_img.bytes_per_pixel > 0 and bpp_new_val < orig_img.bytes_per_pixel:
+                        bpp_new = f"[yellow]{bpp_new}[/yellow]"
+                    elif orig_img.bytes_per_pixel > 0 and bpp_new_val > orig_img.bytes_per_pixel:
+                        bpp_new = f"[green]{bpp_new}[/green]"
+                else:
+                    bpp_new = "—"
+
                 if not comp_img.has_soft_mask:
                     smask_ok = "—"
                 elif comp_img.smask_dimension_mismatch:
@@ -1165,6 +1186,7 @@ def print_comparison(analyses: list):
                     dims_orig, dims_new,
                     filt_orig, filt_new,
                     q_orig, q_new,
+                    bpp_orig, bpp_new,
                     fmt_bytes(ob), fmt_bytes(nb),
                     delta_str,
                     smask_ok,

@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Let Node.js require() ghostscript-wasm directly — don't bundle it through
   // webpack so the .wasm file is loaded from node_modules, not vendor-chunks.
-  serverExternalPackages: ["@jspawn/ghostscript-wasm"],
+  serverExternalPackages: ["@jspawn/ghostscript-wasm", "pdfjs-dist"],
   webpack: (config, { isServer }) => {
     // Prevent canvas native module errors during SSR
     config.resolve.alias.canvas = false;

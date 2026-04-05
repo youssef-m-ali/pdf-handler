@@ -28,7 +28,7 @@ const tools = [
   { href: "/convert/image", icon: Image,  label: "PDF to Image",    description: "Convert each page to PNG or JPEG." },
   { href: "/watermark", icon: Stamp,      label: "Watermark",       description: "Add a text or image watermark to your PDF." },
   { href: "/protect",   icon: Lock,       label: "Protect",         description: "Password-protect a PDF file." },
-  { href: "/extract",        icon: FileType, label: "PDF to Word",   description: "Convert a PDF to an editable Word document (.docx)." },
+  { href: "/convert/word",   icon: FileType, label: "PDF to Word",   description: "Convert a PDF to an editable Word document (.docx)." },
   { href: "/extract/images", icon: Images,   label: "Extract Images", description: "Pull all embedded images out of a PDF as a ZIP." },
 ];
 

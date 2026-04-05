@@ -11,486 +11,459 @@ type M6 = [number, number, number, number, number, number];
 
 interface RichItem {
   str: string;
-  x: number;
-  y: number;        // top-down (flipped from PDF bottom-up)
-  fontSize: number; // in points
-  bold: boolean;
-  italic: boolean;
-  color: string;    // 6-char hex
+  x: number; y: number;   // PDF user space: x from left, y from TOP (top-down)
+  fontSize: number;        // in PDF points
+  bold: boolean; italic: boolean;
+  color: string;           // 6-char hex
 }
 
 interface DocImg {
-  y: number;
-  widthPt: number;
-  heightPt: number;
+  x: number; y: number;   // PDF user space top-down (top-left of image)
+  widthPt: number; heightPt: number;
   buf: Buffer;
 }
 
-// ─── Matrix math ──────────────────────────────────────────────────────────────
+// ─── Matrix helpers ───────────────────────────────────────────────────────────
 
-const mulM = (a: M6, b: M6): M6 => [
-  a[0]*b[0] + a[1]*b[2],       a[0]*b[1] + a[1]*b[3],
-  a[2]*b[0] + a[3]*b[2],       a[2]*b[1] + a[3]*b[3],
-  a[4]*b[0] + a[5]*b[2] + b[4], a[4]*b[1] + a[5]*b[3] + b[5],
-];
-
-// ─── Color helpers ─────────────────────────────────────────────────────────────
-
-const ch = (v: number) =>
-  Math.round(Math.max(0, Math.min(255, v * 255))).toString(16).padStart(2, "0");
-const toHex = (r: number, g: number, b: number) => `${ch(r)}${ch(g)}${ch(b)}`;
-
-// ─── Image data → PNG buffer ───────────────────────────────────────────────────
-
-async function imgDataToPng(imgData: {
-  data: Uint8Array | Uint8ClampedArray;
-  width: number;
-  height: number;
-  kind: number;
-}): Promise<Buffer> {
-  const { data, width, height, kind } = imgData;
-  const raw = Buffer.from(data.buffer instanceof ArrayBuffer ? data.buffer : data);
-
-  // Raw JPEG bytes — pass through sharp to get PNG
-  if (raw[0] === 0xff && raw[1] === 0xd8 && raw[2] === 0xff) {
-    return sharp(raw).png().toBuffer();
-  }
-
-  // kind: 1 = GRAYSCALE_1BPP, 2 = RGB_24BPP, 3 = RGBA_32BPP
-  if (kind === 1) {
-    const bytesPerRow = Math.ceil(width / 8);
-    const expanded = new Uint8Array(width * height);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const byte = raw[y * bytesPerRow + Math.floor(x / 8)];
-        expanded[y * width + x] = (byte >> (7 - (x % 8))) & 1 ? 255 : 0;
-      }
-    }
-    return sharp(Buffer.from(expanded), { raw: { width, height, channels: 1 } }).png().toBuffer();
-  }
-  if (kind === 2) {
-    return sharp(raw.slice(0, width * height * 3), { raw: { width, height, channels: 3 } }).png().toBuffer();
-  }
-  // kind === 3 (RGBA) or fallback
-  return sharp(raw.slice(0, width * height * 4), { raw: { width, height, channels: 4 } }).png().toBuffer();
+/** Concatenate two PDF matrices: C = A × B */
+function mmul(A: M6, B: M6): M6 {
+  return [
+    A[0]*B[0] + A[2]*B[1],
+    A[1]*B[0] + A[3]*B[1],
+    A[0]*B[2] + A[2]*B[3],
+    A[1]*B[2] + A[3]*B[3],
+    A[0]*B[4] + A[2]*B[5] + A[4],
+    A[1]*B[4] + A[3]*B[5] + A[5],
+  ];
 }
 
-// ─── Extract one page ─────────────────────────────────────────────────────────
+// ─── Color ────────────────────────────────────────────────────────────────────
+// pdfjs stores color op args as 0-255 integers, NOT 0-1 floats.
+
+const ch  = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+const rgb = (r: number, g: number, b: number) => `${ch(r)}${ch(g)}${ch(b)}`;
+const cmyk = (c: number, m: number, y: number, k: number) => rgb(
+  (1 - c / 255) * (1 - k / 255) * 255,
+  (1 - m / 255) * (1 - k / 255) * 255,
+  (1 - y / 255) * (1 - k / 255) * 255,
+);
+const isNearWhite = (hex: string) =>
+  parseInt(hex.slice(0, 2), 16) > 230 &&
+  parseInt(hex.slice(2, 4), 16) > 230 &&
+  parseInt(hex.slice(4, 6), 16) > 230;
+
+// ─── Image data → PNG ─────────────────────────────────────────────────────────
+
+async function imgDataToPng(d: {
+  data: Uint8Array | Uint8ClampedArray; width: number; height: number; kind: number;
+}): Promise<Buffer> {
+  const { width: w, height: h, kind } = d;
+  const raw = Buffer.from(d.data.buffer instanceof ArrayBuffer ? d.data.buffer : d.data);
+  if (raw[0] === 0xff && raw[1] === 0xd8) return sharp(raw).png().toBuffer();
+  if (kind === 1) {
+    const bpr = Math.ceil(w / 8);
+    const exp = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        exp[y * w + x] = (raw[y * bpr + Math.floor(x / 8)] >> (7 - (x % 8))) & 1 ? 255 : 0;
+    return sharp(Buffer.from(exp), { raw: { width: w, height: h, channels: 1 } }).png().toBuffer();
+  }
+  if (kind === 2) return sharp(raw.slice(0, w * h * 3), { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+  return sharp(raw.slice(0, w * h * 4), { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
+}
+
+// ─── Extract page ─────────────────────────────────────────────────────────────
 
 async function extractPage(
-  page: any,
-  OPS: any,
-  pageH: number,
-  pageW: number,
+  page: any, OPS: any, pageH: number, pageW: number,
 ): Promise<{ items: RichItem[]; images: DocImg[] }> {
+
   const [tc, opList] = await Promise.all([
     page.getTextContent({ includeMarkedContent: false }),
     page.getOperatorList(),
   ]);
 
   const styles: Record<string, any> = tc.styles ?? {};
+  const fn: number[] = opList.fnArray;
+  const ar: any[][] = opList.argsArray;
 
-  // ── Walk operator list: track CTM, text matrix, fill color, images ──────────
+  // ── Full CTM stack ─────────────────────────────────────────────────────────
+  // We track the complete CTM at every point, so text/image positions
+  // are correctly mapped to PDF user space.
+  let ctmStack: M6[] = [[1, 0, 0, 1, 0, 0]];
 
-  const ctmStack: M6[] = [[1, 0, 0, 1, 0, 0]];
-  let tm: M6 = [1, 0, 0, 1, 0, 0];
-  let tlm: M6 = [1, 0, 0, 1, 0, 0];
-  let fc = "000000";
+  let tm: M6  = [1, 0, 0, 1, 0, 0]; // text matrix
+  let tlm: M6 = [1, 0, 0, 1, 0, 0]; // text line matrix
+  let fc = "000000";                  // current fill colour
 
-  const colorPts: { tx: number; ty: number; col: string }[] = [];
+  // Color observations in PDF user space (x from left, y from BOTTOM)
+  const colorPts: { x: number; y: number; col: string }[] = [];
+
+  // Images: CTM at time of paint + resource name
   const imgOps: { ctm: M6; name: string }[] = [];
   const seenImgs = new Set<string>();
 
   const IMAGE_OPS = new Set([
-    OPS.paintImageXObject,
-    OPS.paintImageMaskXObject,
-    OPS.paintInlineImageXObject,
-    OPS.paintImageXObjectRepeat,
-    OPS.paintJpegXObject,
+    OPS.paintImageXObject, OPS.paintImageMaskXObject,
+    OPS.paintInlineImageXObject, OPS.paintImageXObjectRepeat, OPS.paintJpegXObject,
   ].filter(Boolean));
 
   const TEXT_DRAW_OPS = new Set([
-    OPS.showText,
-    OPS.showSpacedText,
-    OPS.nextLineShowText,
-    OPS.nextLineSetSpacingShowText,
+    OPS.showText, OPS.showSpacedText,
+    OPS.nextLineShowText, OPS.nextLineSetSpacingShowText,
   ].filter(Boolean));
 
-  const fn: number[] = opList.fnArray;
-  const ar: any[][] = opList.argsArray;
-
   for (let i = 0; i < fn.length; i++) {
-    const op = fn[i];
-    const a = ar[i];
+    const op = fn[i], a = ar[i];
+    const ctm = ctmStack[ctmStack.length - 1];
 
     switch (op) {
       case OPS.save:
-        ctmStack.push([...ctmStack[ctmStack.length - 1]] as M6); break;
+        ctmStack.push([...ctm] as M6);
+        break;
       case OPS.restore:
-        if (ctmStack.length > 1) ctmStack.pop(); break;
+        if (ctmStack.length > 1) ctmStack.pop();
+        break;
       case OPS.transform:
-        ctmStack[ctmStack.length - 1] = mulM(ctmStack[ctmStack.length - 1], a as M6); break;
-      case OPS.setFillRGBColor:
-        fc = toHex(a[0], a[1], a[2]); break;
-      case OPS.setFillGray:
-        fc = toHex(a[0], a[0], a[0]); break;
-      case OPS.setFillCMYKColor:
-        fc = toHex((1-a[0])*(1-a[3]), (1-a[1])*(1-a[3]), (1-a[2])*(1-a[3])); break;
+        // PDF matrices concatenate: new = current × incoming
+        ctmStack[ctmStack.length - 1] = mmul(ctm, a as M6);
+        break;
+
+      // Fill colour
+      case OPS.setFillRGBColor:  fc = rgb(a[0], a[1], a[2]); break;
+      case OPS.setFillGray:      fc = rgb(a[0], a[0], a[0]); break;
+      case OPS.setFillCMYKColor: fc = cmyk(a[0], a[1], a[2], a[3]); break;
       case OPS.setFillColor:
-        if (a.length >= 3) fc = toHex(a[0], a[1], a[2]);
-        else if (a.length === 1) fc = toHex(a[0], a[0], a[0]);
+        if (a.length >= 3) fc = rgb(a[0], a[1], a[2]);
+        else if (a.length === 1) fc = rgb(a[0], a[0], a[0]);
         break;
       case OPS.setFillColorN:
         if (typeof a[0] === "number") {
-          if (a.length >= 4) fc = toHex((1-a[0])*(1-a[3]), (1-a[1])*(1-a[3]), (1-a[2])*(1-a[3]));
-          else if (a.length >= 3) fc = toHex(a[0], a[1], a[2]);
-          else if (a.length >= 1) fc = toHex(a[0], a[0], a[0]);
+          if (a.length >= 4)      fc = cmyk(a[0], a[1], a[2], a[3]);
+          else if (a.length >= 3) fc = rgb(a[0], a[1], a[2]);
+          else                    fc = rgb(a[0], a[0], a[0]);
         }
         break;
+
+      // Text matrix
       case OPS.setTextMatrix:
-        tm = [a[0], a[1], a[2], a[3], a[4], a[5]]; tlm = [...tm] as M6; break;
+        tm = [a[0], a[1], a[2], a[3], a[4], a[5]] as M6;
+        tlm = [...tm] as M6;
+        break;
       case OPS.moveText:
-        tlm = mulM(tlm, [1, 0, 0, 1, a[0], a[1]]); tm = [...tlm] as M6; break;
+        tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4] + a[0], tlm[5] + a[1]] as M6;
+        tm  = [...tlm] as M6;
+        break;
       case OPS.setLeadingMoveText:
-        tlm = mulM(tlm, [1, 0, 0, 1, a[0], a[1]]); tm = [...tlm] as M6; break;
+        tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4] + a[0], tlm[5] + a[1]] as M6;
+        tm  = [...tlm] as M6;
+        break;
       case OPS.nextLine:
-        tm = [...tlm] as M6; break;
+        tm = [...tlm] as M6;
+        break;
     }
 
     if (TEXT_DRAW_OPS.has(op)) {
-      colorPts.push({ tx: tm[4], ty: tm[5], col: fc });
+      // Actual PDF position = CTM × TM origin
+      const C = ctmStack[ctmStack.length - 1];
+      const xPdf = C[0]*tm[4] + C[2]*tm[5] + C[4];
+      const yPdf = C[1]*tm[4] + C[3]*tm[5] + C[5];
+      colorPts.push({ x: xPdf, y: yPdf, col: fc });
     }
 
     if (IMAGE_OPS.has(op)) {
       const name = a[0] as string;
       if (typeof name === "string" && !seenImgs.has(name)) {
         seenImgs.add(name);
+        // Snapshot the full CTM at image-paint time
         imgOps.push({ ctm: [...ctmStack[ctmStack.length - 1]] as M6, name });
       }
     }
   }
 
-  // ── Find nearest color for a text item ────────────────────────────────────
+  // ── Assign colour to each text item ───────────────────────────────────────
+  // Color points and text items are both in PDF user space — compare directly.
+  // Use a tight threshold (20 pt) to avoid cross-contamination.
 
-  const getColor = (tx: number, ty: number): string => {
-    let best = "000000";
-    let bestD = Infinity;
+  const getColor = (xPdf: number, yPdf: number): string => {
+    let best = "000000", bestD = Infinity;
     for (const p of colorPts) {
-      const d = Math.abs(p.tx - tx) + Math.abs(p.ty - ty);
+      const d = Math.abs(p.x - xPdf) + Math.abs(p.y - yPdf);
       if (d < bestD) { bestD = d; best = p.col; }
     }
-    return bestD < 300 ? best : "000000";
+    return bestD < 20 ? best : "000000";
   };
 
-  // ── Build rich text items ──────────────────────────────────────────────────
+  // ── Build text items ───────────────────────────────────────────────────────
 
   const rawItems: RichItem[] = [];
-
   for (const raw of tc.items as any[]) {
     if (!("str" in raw) || !raw.str?.trim()) continue;
-    const [a0, b0, , , tx, ty] = raw.transform as number[];
-    const fontSize = Math.sqrt(a0 ** 2 + b0 ** 2);
-    const fontName: string = raw.fontName ?? "";
-    const fontFamily: string = styles[fontName]?.fontFamily ?? "";
-
+    const [a0, b0, , , xPdf, yPdf] = raw.transform as number[];
+    const fontSize   = Math.sqrt(a0 ** 2 + b0 ** 2);
+    const fontName   = raw.fontName ?? "";
+    const fontFamily = styles[fontName]?.fontFamily ?? "";
+    const col        = getColor(xPdf, yPdf);
     rawItems.push({
-      str: raw.str,
-      x: tx,
-      y: pageH - ty,   // flip to top-down
+      str:      raw.str,
+      x:        xPdf,
+      y:        pageH - yPdf,          // flip to top-down
       fontSize: Math.max(fontSize, 4),
-      bold: /bold/i.test(fontName + fontFamily),
-      italic: /italic|oblique/i.test(fontName + fontFamily),
-      color: getColor(tx, ty),
+      bold:     /bold/i.test(fontName + fontFamily),
+      italic:   /italic|oblique/i.test(fontName + fontFamily),
+      color:    isNearWhite(col) ? "000000" : col,
     });
   }
 
-  // Deduplicate items with same str at nearly the same position (duplicate layers)
+  // Remove duplicate renders (shadow/stroke layers some PDFs use)
   const items = rawItems.filter((item, i) =>
-    !rawItems.some((other, j) =>
-      j < i &&
-      other.str === item.str &&
-      Math.abs(other.x - item.x) < 3 &&
-      Math.abs(other.y - item.y) < 3
+    !rawItems.some((o, j) =>
+      j < i && o.str === item.str &&
+      Math.abs(o.x - item.x) < 3 && Math.abs(o.y - item.y) < 3
     )
   );
 
-  // ── Extract images ─────────────────────────────────────────────────────────
+  // ── Convert image CTM → PDF bounding box ──────────────────────────────────
+  // The image unit square [0,1]×[0,1] is transformed by the full CTM.
+  // Compute the axis-aligned bounding box of the four corners.
 
   const images: DocImg[] = [];
-
-  for (const { ctm, name } of imgOps) {
+  for (const { ctm: C, name } of imgOps) {
     try {
       const imgData: any = await Promise.race<any>([
         new Promise<any>(res => page.objs.get(name, res)),
         new Promise<any>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
-      ]).catch(() =>
-        new Promise<any>(res => page.commonObjs.get(name, res))
-      );
+      ]).catch(() => new Promise<any>(res => page.commonObjs.get(name, res)));
 
       if (!imgData?.data || !imgData.width || !imgData.height) continue;
 
-      const widthPt  = Math.abs(ctm[0]);
-      const heightPt = Math.abs(ctm[3]);
+      // Four corners of the image unit square in PDF user space
+      const corners = [
+        [C[4],              C[5]],
+        [C[0]+C[4],         C[1]+C[5]],
+        [C[2]+C[4],         C[3]+C[5]],
+        [C[0]+C[2]+C[4],    C[1]+C[3]+C[5]],
+      ];
+      const xs = corners.map(c => c[0]);
+      const ys = corners.map(c => c[1]);
+      const xMin = Math.min(...xs), xMax = Math.max(...xs);
+      const yMin = Math.min(...ys), yMax = Math.max(...ys); // PDF y-up
 
-      // Skip tiny images (borders, bullets, artefacts) and images wider than the page
-      if (widthPt < 8 || heightPt < 8) continue;
-      if (widthPt > pageW * 1.05) continue;
+      const widthPt  = xMax - xMin;
+      const heightPt = yMax - yMin;
 
-      // Convert PDF bottom-up to top-down.
-      // ctm[5] = bottom-left Y of the image in PDF coordinates.
-      // When ctm[3] > 0 (non-flipped): top of image in PDF = ctm[5] + heightPt
-      //   → top in top-down = pageH - (ctm[5] + heightPt)
-      // When ctm[3] < 0 (flipped):    ctm[5] is already the top in PDF coordinates
-      //   → top in top-down = pageH - ctm[5]
-      const imgY = pageH - ctm[5] - (ctm[3] >= 0 ? heightPt : 0);
+      if (widthPt < 4 || heightPt < 4) continue;
+      if (widthPt > pageW * 1.05)      continue; // skip full-page backgrounds
+
+      const yTopdown = pageH - yMax; // convert: PDF y-up → top-down
 
       const pngBuf = await imgDataToPng(imgData);
-      images.push({ y: imgY, widthPt, heightPt, buf: pngBuf });
-    } catch {
-      // Image extraction failed — skip gracefully
-    }
+      images.push({ x: xMin, y: yTopdown, widthPt, heightPt, buf: pngBuf });
+    } catch { /* skip */ }
   }
 
   return { items, images };
 }
 
-// ─── Group items → lines → paragraphs ─────────────────────────────────────────
+// ─── Group text items into absolutely-positioned frames ───────────────────────
 
 interface Line { items: RichItem[]; y: number; fs: number }
-interface Para { lines: Line[] }
 
-function buildParagraphs(items: RichItem[], pageW: number): Para[] {
+function buildTextFrames(items: RichItem[], pageW: number) {
   if (!items.length) return [];
 
-  const sorted = [...items].sort((a, b) =>
-    a.y !== b.y ? a.y - b.y : a.x - b.x
-  );
+  const sorted = [...items].sort((a, b) => a.y !== b.y ? a.y - b.y : a.x - b.x);
 
-  // Group into lines by Y proximity
-  const lines: Line[] = [];
-  let cur: RichItem[] = [sorted[0]];
-
+  // Cluster into visual lines
+  const lineGroups: RichItem[][] = [[sorted[0]]];
   for (let i = 1; i < sorted.length; i++) {
-    const tol = Math.max(sorted[i - 1].fontSize, sorted[i].fontSize) * 0.6;
-    if (Math.abs(sorted[i].y - sorted[i - 1].y) <= tol) {
-      cur.push(sorted[i]);
-    } else {
-      const fs = cur.reduce((s, x) => s + x.fontSize, 0) / cur.length;
-      lines.push({ items: cur.sort((a, b) => a.x - b.x), y: cur[0].y, fs });
-      cur = [sorted[i]];
-    }
+    const tol = Math.max(sorted[i - 1].fontSize, sorted[i].fontSize) * 0.55;
+    if (Math.abs(sorted[i].y - sorted[i - 1].y) <= tol)
+      lineGroups[lineGroups.length - 1].push(sorted[i]);
+    else
+      lineGroups.push([sorted[i]]);
   }
-  {
-    const fs = cur.reduce((s, x) => s + x.fontSize, 0) / cur.length;
-    lines.push({ items: cur.sort((a, b) => a.x - b.x), y: cur[0].y, fs });
-  }
+  for (const lg of lineGroups) lg.sort((a, b) => a.x - b.x);
 
-  // Split lines with large column gaps into two separate lines.
-  // A "column gap" is a horizontal gap > 15% of page width between adjacent items.
-  const colGapThreshold = pageW * 0.15;
-  const splitLines: Line[] = [];
-  for (const line of lines) {
-    if (line.items.length < 2) { splitLines.push(line); continue; }
-
-    const groups: RichItem[][] = [[line.items[0]]];
-    for (let i = 1; i < line.items.length; i++) {
-      const prev = line.items[i - 1];
-      const curr = line.items[i];
-      // Approximate right edge of previous item
+  // Split lines at large column gaps
+  const colGap = pageW * 0.12;
+  const subLines: RichItem[][] = [];
+  for (const lg of lineGroups) {
+    let cur: RichItem[] = [lg[0]];
+    for (let i = 1; i < lg.length; i++) {
+      const prev = lg[i - 1];
       const prevRight = prev.x + prev.str.length * prev.fontSize * 0.55;
-      if (curr.x - prevRight > colGapThreshold) {
-        groups.push([curr]);
-      } else {
-        groups[groups.length - 1].push(curr);
-      }
+      if (lg[i].x - prevRight > colGap) { subLines.push(cur); cur = [lg[i]]; }
+      else cur.push(lg[i]);
     }
-
-    for (const g of groups) {
-      const fs = g.reduce((s, x) => s + x.fontSize, 0) / g.length;
-      splitLines.push({ items: g, y: g[0].y, fs });
-    }
+    subLines.push(cur);
   }
 
-  // Measure inter-line gaps to detect paragraph breaks
-  const gaps = splitLines.slice(1).map((l, i) => l.y - splitLines[i].y - splitLines[i].fs);
-  const posGaps = gaps.filter(g => g >= 0).sort((a, b) => a - b);
-  const medGap = posGaps[Math.floor(posGaps.length / 2)] ?? 0;
-  const paraThresh = Math.max(medGap * 1.8, (splitLines[0]?.fs ?? 10) * 0.7);
+  // Group sub-lines into frames (same rough x-origin + small vertical gap)
+  const avgFs  = (g: RichItem[]) => g.reduce((s, x) => s + x.fontSize, 0) / g.length;
+  const minX   = (g: RichItem[]) => Math.min(...g.map(i => i.x));
+  const minY   = (g: RichItem[]) => Math.min(...g.map(i => i.y));
 
-  const paras: Para[] = [];
-  let para: Para = { lines: [splitLines[0]] };
+  type Frame = { lines: RichItem[][] };
+  const frames: Frame[] = [];
+  let curLines: RichItem[][] = [subLines[0]];
 
-  for (let i = 0; i < gaps.length; i++) {
-    if (gaps[i] > paraThresh) {
-      paras.push(para);
-      para = { lines: [splitLines[i + 1]] };
-    } else {
-      para.lines.push(splitLines[i + 1]);
-    }
+  for (let i = 1; i < subLines.length; i++) {
+    const prev = subLines[i - 1];
+    const curr = subLines[i];
+    const gap    = minY(curr) - minY(prev) - avgFs(prev);
+    const xDiff  = Math.abs(minX(curr) - minX(curLines[0]));
+    const nearby = gap >= 0 && gap < avgFs(prev) * 1.2 && xDiff < pageW * 0.08;
+    if (nearby) curLines.push(curr);
+    else { frames.push({ lines: curLines }); curLines = [curr]; }
   }
-  paras.push(para);
+  frames.push({ lines: curLines });
 
-  return paras;
+  return frames.map(f => {
+    const all     = f.lines.flat();
+    const x       = Math.min(...all.map(i => i.x));
+    const y       = Math.min(...all.map(i => i.y));
+    const maxFs   = Math.max(...all.map(i => i.fontSize));
+    const maxRight = Math.max(...all.map(i => i.x + i.str.length * i.fontSize * 0.6));
+    const maxY    = Math.max(...all.map(i => i.y));
+    return {
+      x, y,
+      width:  Math.max(maxRight - x + maxFs, 40),
+      height: Math.max(maxY - y + maxFs * 1.5, maxFs * 1.2),
+      lines:  f.lines,
+    };
+  });
 }
 
-// ─── Build DOCX ────────────────────────────────────────────────────────────────
+// ─── Build DOCX ───────────────────────────────────────────────────────────────
 
 async function buildDocx(
-  pages: { items: RichItem[]; images: DocImg[]; pageW: number }[]
+  pages: { items: RichItem[]; images: DocImg[]; pageW: number; pageH: number }[],
 ): Promise<Buffer> {
-  const { Document, Packer, Paragraph, TextRun, ImageRun, PageBreak } =
-    await import("docx");
+  const {
+    Document, Packer, Paragraph, TextRun, ImageRun,
+    FrameAnchorType, FrameWrap,
+    HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
+    TextWrappingType, PageOrientation,
+  } = await import("docx");
 
-  // Determine body font size as 40th percentile across all pages
-  const allSizes = pages
-    .flatMap(p => p.items.filter(i => i.str.trim()).map(i => i.fontSize))
-    .sort((a, b) => a - b);
-  const bodyPt = allSizes[Math.floor(allSizes.length * 0.4)] ?? 11;
+  const PT_TWIP = 20;
+  const PT_EMU  = 12700;
 
-  // Heading threshold: 30% larger than body
-  const headingThreshold = bodyPt * 1.3;
+  const sections: any[] = [];
 
-  const docChildren: any[] = [];
+  for (const { items, images, pageW, pageH } of pages) {
+    const children: any[] = [];
 
-  for (let pi = 0; pi < pages.length; pi++) {
-    if (pi > 0) {
-      docChildren.push(new Paragraph({ children: [new PageBreak()] }));
-    }
-
-    const { items, images, pageW } = pages[pi];
-    const paras = buildParagraphs(items, pageW);
-
-    // Interleave paragraphs and images sorted by Y position
-    type Block =
-      | { kind: "para"; para: Para; y: number }
-      | { kind: "img"; img: DocImg; y: number };
-
-    const blocks: Block[] = [
-      ...paras.map(p => ({ kind: "para" as const, para: p, y: p.lines[0].y })),
-      ...images.map(img => ({ kind: "img" as const, img, y: img.y })),
-    ].sort((a, b) => a.y - b.y);
-
-    for (const block of blocks) {
-
-      // ── Image block ─────────────────────────────────────────────────────────
-      if (block.kind === "img") {
-        const { widthPt, heightPt, buf } = block.img;
-        // Max usable width = 6.5" at 96 DPI = 624px
-        const maxWPx = 624;
-        const wPx = (widthPt / 72) * 96;
-        const hPx = (heightPt / 72) * 96;
-        const scale = Math.min(1, maxWPx / wPx);
-        docChildren.push(
-          new Paragraph({
-            children: [
-              new ImageRun({
-                type: "png",
-                data: buf,
-                transformation: {
-                  width: Math.round(wPx * scale),
-                  height: Math.round(hPx * scale),
-                },
-              }),
-            ],
-            spacing: { before: 80, after: 80 },
-          })
-        );
-        continue;
-      }
-
-      // ── Text paragraph block ────────────────────────────────────────────────
-      const { para } = block;
-      const allItems = para.lines.flatMap(l => l.items);
-      if (!allItems.some(i => i.str.trim())) continue;
-
-      const avgFs = allItems.reduce((s, i) => s + i.fontSize, 0) / allItems.length;
-      const isHeading = avgFs > headingThreshold;
-      // docx size is in half-points
-      const halfPt = (fs: number) => Math.max(16, Math.round(fs * 2));
-
-      // Build TextRuns, merging runs with identical style
-      const runs: any[] = [];
-      let rbuf = "";
-      let rcur: RichItem | null = null;
-
-      const flushRun = () => {
-        if (!rcur || !rbuf) return;
-        runs.push(
-          new TextRun({
-            text: rbuf,
-            bold: rcur.bold || isHeading,
-            italics: rcur.italic,
-            color: rcur.color !== "000000" ? rcur.color : undefined,
-            size: halfPt(rcur.fontSize),
-          })
-        );
-        rbuf = "";
-        rcur = null;
+    // ── Text frames ──────────────────────────────────────────────────────────
+    for (const frame of buildTextFrames(items, pageW)) {
+      const framePr = {
+        position: {
+          x: Math.round(frame.x * PT_TWIP),
+          y: Math.round(frame.y * PT_TWIP),
+        },
+        width:  Math.round(frame.width  * PT_TWIP),
+        height: Math.round(frame.height * PT_TWIP),
+        anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE },
+        wrap:   FrameWrap.NONE,
+        allowOverlap: true,
       };
 
-      for (let li = 0; li < para.lines.length; li++) {
-        const lineItems = para.lines[li].items;
+      for (const lineItems of frame.lines) {
+        const runs: any[] = [];
+        let rbuf = ""; let rcur: RichItem | null = null;
+
+        const flush = () => {
+          if (!rcur || !rbuf) return;
+          runs.push(new TextRun({
+            text:    rbuf,
+            bold:    rcur.bold,
+            italics: rcur.italic,
+            color:   rcur.color !== "000000" ? rcur.color : undefined,
+            size:    Math.max(16, Math.round(rcur.fontSize * 2)),
+          }));
+          rbuf = ""; rcur = null;
+        };
 
         for (let ii = 0; ii < lineItems.length; ii++) {
           const item = lineItems[ii];
-          const sameStyle =
-            rcur !== null &&
-            rcur.bold === item.bold &&
-            rcur.italic === item.italic &&
-            rcur.color === item.color &&
-            Math.abs(rcur.fontSize - item.fontSize) < 1;
+          const same = rcur !== null &&
+            rcur.bold === item.bold && rcur.italic === item.italic &&
+            rcur.color === item.color && Math.abs(rcur.fontSize - item.fontSize) < 0.5;
+          if (!same) { flush(); rcur = item; rbuf = item.str; }
+          else rbuf += item.str;
 
-          if (!sameStyle) {
-            flushRun();
-            rcur = item;
-            rbuf = item.str;
-          } else {
-            rbuf += item.str;
-          }
-
-          // Insert space if there is a visible gap to the next item
           if (ii < lineItems.length - 1) {
             const nxt = lineItems[ii + 1];
             const approxRight = item.x + item.str.length * item.fontSize * 0.5;
-            if (
-              !rbuf.endsWith(" ") &&
-              !nxt.str.startsWith(" ") &&
-              nxt.x > approxRight + item.fontSize * 0.1
-            ) {
+            if (!rbuf.endsWith(" ") && !nxt.str.startsWith(" ") &&
+                nxt.x > approxRight + item.fontSize * 0.1)
               rbuf += " ";
-            }
           }
         }
+        flush();
+        if (!runs.length) continue;
 
-        // Soft newline between lines in the same paragraph
-        if (li < para.lines.length - 1 && rbuf && !rbuf.endsWith(" ")) {
-          rbuf += " ";
-        }
-      }
-      flushRun();
-
-      if (!runs.length) continue;
-
-      docChildren.push(
-        new Paragraph({
+        children.push(new Paragraph({
           children: runs,
-          spacing: {
-            // before/after in twentieths of a point
-            before: isHeading ? 240 : 0,
-            after: isHeading ? 100 : 80,
-            // line in twentieths of a point: 240 = single, 276 = 1.15×
-            line: 276,
-          },
-        })
-      );
+          frame:    framePr,
+          spacing:  { line: 240 },
+        }));
+      }
     }
+
+    // ── Floating images ───────────────────────────────────────────────────────
+    for (const img of images) {
+      const scale = Math.min(1, (pageW * 0.98) / img.widthPt);
+      const wPt   = img.widthPt  * scale;
+      const hPt   = img.heightPt * scale;
+      const wPx   = Math.round((wPt / 72) * 96);
+      const hPx   = Math.round((hPt / 72) * 96);
+
+      children.push(new Paragraph({
+        children: [new ImageRun({
+          type: "png",
+          data: img.buf,
+          transformation: { width: wPx, height: hPx },
+          floating: {
+            horizontalPosition: {
+              relative: HorizontalPositionRelativeFrom.PAGE,
+              offset:   Math.round(img.x * PT_EMU),
+            },
+            verticalPosition: {
+              relative: VerticalPositionRelativeFrom.PAGE,
+              offset:   Math.round(img.y * PT_EMU),
+            },
+            wrap:         { type: TextWrappingType.NONE },
+            allowOverlap: true,
+            behindDocument: false,
+          },
+        })],
+      }));
+    }
+
+    children.push(new Paragraph({ children: [] }));
+
+    sections.push({
+      properties: {
+        page: {
+          size: {
+            width:  Math.round(pageW * PT_TWIP),
+            height: Math.round(pageH * PT_TWIP),
+            orientation: pageW > pageH ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT,
+          },
+          margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        },
+      },
+      children,
+    });
   }
 
-  const doc = new Document({ sections: [{ children: docChildren }] });
+  const doc = new Document({ sections });
   return Packer.toBuffer(doc);
 }
 
-// ─── Route ─────────────────────────────────────────────────────────────────────
+// ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
@@ -499,33 +472,28 @@ export async function POST(req: NextRequest) {
     if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
     const buf = await file.arrayBuffer();
-
     const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const workerPath = path.join(
-      process.cwd(),
-      "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs"
-    );
-    pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
+      path.join(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs")
+    ).href;
 
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
     const OPS = pdfjsLib.OPS;
-
-    const pages: { items: RichItem[]; images: DocImg[]; pageW: number }[] = [];
+    const pages: { items: RichItem[]; images: DocImg[]; pageW: number; pageH: number }[] = [];
 
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1 });
-      const { items, images } = await extractPage(page, OPS, viewport.height, viewport.width);
-      pages.push({ items, images, pageW: viewport.width });
+      const vp = page.getViewport({ scale: 1 });
+      const { items, images } = await extractPage(page, OPS, vp.height, vp.width);
+      pages.push({ items, images, pageW: vp.width, pageH: vp.height });
     }
 
-    const docxBuf = await buildDocx(pages);
+    const docxBuf  = await buildDocx(pages);
     const baseName = file.name.replace(/\.pdf$/i, "");
 
     return new NextResponse(docxBuf, {
       headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "Content-Disposition": `attachment; filename="${encodeURIComponent(`${baseName}.docx`)}"`,
       },
     });

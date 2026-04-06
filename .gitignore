@@ -33,5 +33,5 @@ Thumbs.db
 next-env.d.ts
 
 # PDF files and test output
-files/*.pdf
+files/
 scripts/*.json

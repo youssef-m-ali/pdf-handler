@@ -12,6 +12,7 @@ type M6 = [number, number, number, number, number, number];
 interface RichItem {
   str: string;
   x: number; y: number;   // PDF user space: x from left, y from TOP (top-down)
+  width: number;           // actual rendered width in PDF user space points
   fontSize: number;        // in PDF points
   bold: boolean; italic: boolean;
   color: string;           // 6-char hex
@@ -208,6 +209,7 @@ async function extractPage(
       str:      raw.str,
       x:        xPdf,
       y:        pageH - yPdf,          // flip to top-down
+      width:    raw.width ?? 0,        // actual rendered width from pdfjs
       fontSize: Math.max(fontSize, 4),
       bold:     /bold/i.test(fontName + fontFamily),
       italic:   /italic|oblique/i.test(fontName + fontFamily),
@@ -265,74 +267,224 @@ async function extractPage(
   return { items, images };
 }
 
-// ─── Group text items into absolutely-positioned frames ───────────────────────
+// ─── Flow-based reconstruction ────────────────────────────────────────────────
 
-interface Line { items: RichItem[]; y: number; fs: number }
+interface Line { items: RichItem[]; yTop: number; fontSize: number; colIndex: number }
 
-function buildTextFrames(items: RichItem[], pageW: number) {
+// ─── Step 1: Cluster items into visual lines ──────────────────────────────────
+// Items sharing the same y (± tolerance) form a line group.
+// Lines are then split at large horizontal gaps so that left-column and
+// right-column items are always in separate line groups — even before we
+// know whether the page is single- or multi-column.
+
+function clusterLines(items: RichItem[], pageW: number): RichItem[][] {
   if (!items.length) return [];
-
   const sorted = [...items].sort((a, b) => a.y !== b.y ? a.y - b.y : a.x - b.x);
 
-  // Cluster into visual lines
-  const lineGroups: RichItem[][] = [[sorted[0]]];
+  // Group by y proximity
+  const yGroups: RichItem[][] = [[sorted[0]]];
   for (let i = 1; i < sorted.length; i++) {
     const tol = Math.max(sorted[i - 1].fontSize, sorted[i].fontSize) * 0.55;
     if (Math.abs(sorted[i].y - sorted[i - 1].y) <= tol)
-      lineGroups[lineGroups.length - 1].push(sorted[i]);
+      yGroups[yGroups.length - 1].push(sorted[i]);
     else
-      lineGroups.push([sorted[i]]);
+      yGroups.push([sorted[i]]);
   }
-  for (const lg of lineGroups) lg.sort((a, b) => a.x - b.x);
+  for (const g of yGroups) g.sort((a, b) => a.x - b.x);
 
-  // Split lines at large column gaps
-  const colGap = pageW * 0.12;
-  const subLines: RichItem[][] = [];
-  for (const lg of lineGroups) {
-    let cur: RichItem[] = [lg[0]];
-    for (let i = 1; i < lg.length; i++) {
-      const prev = lg[i - 1];
-      const prevRight = prev.x + prev.str.length * prev.fontSize * 0.55;
-      if (lg[i].x - prevRight > colGap) { subLines.push(cur); cur = [lg[i]]; }
-      else cur.push(lg[i]);
+  // Split each y-group at horizontal gaps ≥ 2% of page width (~12pt on US Letter).
+  // This must be small enough to catch narrow academic column gaps (~20pt)
+  // but large enough to not split word spacing (~3-5pt).
+  const colGap = pageW * 0.02;
+  const result: RichItem[][] = [];
+  for (const g of yGroups) {
+    let cur: RichItem[] = [g[0]];
+    for (let i = 1; i < g.length; i++) {
+      const prev      = g[i - 1];
+      const prevRight = prev.x + (prev.width > 0 ? prev.width : prev.str.length * prev.fontSize * 0.55);
+      if (g[i].x - prevRight > colGap) { result.push(cur); cur = [g[i]]; }
+      else cur.push(g[i]);
     }
-    subLines.push(cur);
+    result.push(cur);
+  }
+  return result;
+}
+
+// ─── Step 2: Detect page layout ───────────────────────────────────────────────
+
+interface Layout {
+  columns:        number;   // 1 or 2
+  colBoundary:    number;   // x split point (pt), 0 if single-column
+  colGapPt:       number;   // gap between columns (pt)
+  leftMargin:     number;   // inferred left page margin (pt)
+  rightMargin:    number;   // inferred right page margin (pt)
+  topMargin:      number;   // inferred top page margin (pt)
+  bottomMargin:   number;   // inferred bottom page margin (pt)
+  headerLineIdxs: Set<number>; // line-group indices that are header (span full width)
+}
+
+function detectLayout(lineGroups: RichItem[][], pageW: number, pageH: number): Layout {
+  // Compute xMin/xMax per line
+  const lineSpans = lineGroups.map(lg => ({
+    xMin: Math.min(...lg.map(i => i.x)),
+    xMax: Math.max(...lg.map(i => i.x + (i.width > 0 ? i.width : i.str.length * i.fontSize * 0.5))),
+  }));
+
+  // Header lines: span > 50% of page width (title, authors, etc.)
+  const headerLineIdxs = new Set<number>();
+  for (let i = 0; i < lineSpans.length; i++) {
+    if (lineSpans[i].xMax - lineSpans[i].xMin > pageW * 0.5)
+      headerLineIdxs.add(i);
   }
 
-  // Group sub-lines into frames (same rough x-origin + small vertical gap)
-  const avgFs  = (g: RichItem[]) => g.reduce((s, x) => s + x.fontSize, 0) / g.length;
-  const minX   = (g: RichItem[]) => Math.min(...g.map(i => i.x));
-  const minY   = (g: RichItem[]) => Math.min(...g.map(i => i.y));
+  // Body lines: everything else
+  const bodySpans = lineSpans.filter((_, i) => !headerLineIdxs.has(i));
 
-  type Frame = { lines: RichItem[][] };
-  const frames: Frame[] = [];
-  let curLines: RichItem[][] = [subLines[0]];
+  // Infer margins from body text extents
+  const allXMins = bodySpans.map(s => s.xMin).filter(x => x > 0);
+  const allXMaxs = bodySpans.map(s => s.xMax).filter(x => x < pageW);
+  const allYTops = lineGroups.flatMap(lg => lg.map(i => i.y)).filter(y => y > 0);
+  const allYBots = lineGroups.flatMap(lg => lg.map(i => i.y + i.fontSize)).filter(y => y < pageH);
 
-  for (let i = 1; i < subLines.length; i++) {
-    const prev = subLines[i - 1];
-    const curr = subLines[i];
-    const gap    = minY(curr) - minY(prev) - avgFs(prev);
-    const xDiff  = Math.abs(minX(curr) - minX(curLines[0]));
-    const nearby = gap >= 0 && gap < avgFs(prev) * 1.2 && xDiff < pageW * 0.08;
-    if (nearby) curLines.push(curr);
-    else { frames.push({ lines: curLines }); curLines = [curr]; }
+  const leftMargin   = allXMins.length ? Math.min(...allXMins) : 72;
+  const rightMargin  = allXMaxs.length ? pageW - Math.max(...allXMaxs) : 72;
+  const topMargin    = allYTops.length ? Math.min(...allYTops) : 72;
+  const bottomMargin = allYBots.length ? pageH - Math.max(...allYBots) : 72;
+
+  // Two-column detection: find the largest gap in body xMin values in center 30–70% of page
+  if (bodySpans.length < 4) {
+    return { columns: 1, colBoundary: 0, colGapPt: 0, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
   }
-  frames.push({ lines: curLines });
 
-  return frames.map(f => {
-    const all     = f.lines.flat();
-    const x       = Math.min(...all.map(i => i.x));
-    const y       = Math.min(...all.map(i => i.y));
-    const maxFs   = Math.max(...all.map(i => i.fontSize));
-    const maxRight = Math.max(...all.map(i => i.x + i.str.length * i.fontSize * 0.6));
-    const maxY    = Math.max(...all.map(i => i.y));
-    return {
-      x, y,
-      width:  Math.max(maxRight - x + maxFs, 40),
-      height: Math.max(maxY - y + maxFs * 1.5, maxFs * 1.2),
-      lines:  f.lines,
-    };
+  // Collect all body xMins, sort, find biggest gap in the center zone
+  const xMins = [...new Set(bodySpans.map(s => Math.round(s.xMin)))].sort((a, b) => a - b);
+  let maxGap = 0, gapAt = 0, gapEnd = 0;
+  for (let i = 1; i < xMins.length; i++) {
+    const gap = xMins[i] - xMins[i - 1];
+    const pos = (xMins[i - 1] + xMins[i]) / 2;
+    if (gap > maxGap && pos > pageW * 0.3 && pos < pageW * 0.7) {
+      maxGap = gap; gapAt = xMins[i - 1]; gapEnd = xMins[i];
+    }
+  }
+
+  if (maxGap >= pageW * 0.15) {
+    const colBoundary = (gapAt + gapEnd) / 2;
+    return { columns: 2, colBoundary, colGapPt: maxGap, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
+  }
+
+  return { columns: 1, colBoundary: 0, colGapPt: 0, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
+}
+
+// ─── Step 3: Sort items into reading order ────────────────────────────────────
+
+function sortInReadingOrder(lineGroups: RichItem[][], layout: Layout): Line[] {
+  const lines: Line[] = [];
+
+  for (let gi = 0; gi < lineGroups.length; gi++) {
+    const lg = lineGroups[gi];
+    const isHeader = layout.headerLineIdxs.has(gi);
+    const yTop     = Math.min(...lg.map(i => i.y));
+    const fontSize = Math.max(...lg.map(i => i.fontSize));
+
+    if (layout.columns === 1 || isHeader) {
+      lines.push({ items: lg, yTop, fontSize, colIndex: isHeader ? -1 : 0 });
+    } else {
+      // Split line items into left/right column groups
+      const left  = lg.filter(i => i.x < layout.colBoundary);
+      const right = lg.filter(i => i.x >= layout.colBoundary);
+      if (left.length)  lines.push({ items: left,  yTop, fontSize, colIndex: 0 });
+      if (right.length) lines.push({ items: right, yTop, fontSize, colIndex: 1 });
+    }
+  }
+
+  // Sort: header first (-1), then left col (0) top-down, then right col (1) top-down
+  lines.sort((a, b) => {
+    if (a.colIndex !== b.colIndex) return a.colIndex - b.colIndex;
+    return a.yTop - b.yTop;
   });
+
+  return lines;
+}
+
+// ─── Step 4: Build paragraphs from lines ─────────────────────────────────────
+
+function linesToParagraphs(
+  lines: Line[],
+  colLeftEdge: number,
+  Paragraph: any, TextRun: any,
+): any[] {
+  const PT_TWIP = 20;
+  const paragraphs: any[] = [];
+
+  let prevBottom  = -1;
+  let prevColIdx  = -99;
+
+  for (const line of lines) {
+    // Only add extra space before when the gap is a real paragraph break —
+    // i.e. significantly larger than normal line spacing (> 0.5× fontSize).
+    // Reset when switching columns (y-gap is meaningless across columns).
+    let spaceBefore = 0;
+    const sameCol = line.colIndex === prevColIdx;
+    if (prevBottom >= 0 && sameCol) {
+      const gap = line.yTop - prevBottom;          // in PDF points
+      const normalLineGap = line.fontSize * 0.5;   // what Word already renders
+      if (gap > normalLineGap) {
+        // Only encode the *extra* gap beyond normal line spacing, capped at 20pt
+        const extraPt = Math.min(gap - normalLineGap, 20);
+        spaceBefore = Math.round(extraPt * PT_TWIP);
+      }
+    }
+    prevBottom = line.yTop + line.fontSize;
+    prevColIdx = line.colIndex;
+
+    // Indent relative to column left edge
+    const lineX = Math.min(...line.items.map(i => i.x));
+    const indentLeft = Math.max(0, Math.round((lineX - colLeftEdge) * PT_TWIP));
+
+    // Merge runs with same style
+    const runs: any[] = [];
+    let rbuf = "", rcur: RichItem | null = null;
+
+    const flush = () => {
+      if (!rcur || !rbuf) return;
+      runs.push(new TextRun({
+        text:    rbuf,
+        bold:    rcur.bold,
+        italics: rcur.italic,
+        color:   rcur.color !== "000000" ? rcur.color : undefined,
+        size:    Math.max(16, Math.round(rcur.fontSize * 2)),
+      }));
+      rbuf = ""; rcur = null;
+    };
+
+    for (let ii = 0; ii < line.items.length; ii++) {
+      const item = line.items[ii];
+      const same = rcur !== null &&
+        rcur.bold === item.bold && rcur.italic === item.italic &&
+        rcur.color === item.color && Math.abs(rcur.fontSize - item.fontSize) < 0.5;
+      if (!same) { flush(); rcur = item; rbuf = item.str; }
+      else rbuf += item.str;
+
+      // Auto-space between items with a visible gap
+      if (ii < line.items.length - 1) {
+        const nxt = line.items[ii + 1];
+        const approxRight = item.x + item.str.length * item.fontSize * 0.5;
+        if (!rbuf.endsWith(" ") && !nxt.str.startsWith(" ") &&
+            nxt.x > approxRight + item.fontSize * 0.1)
+          rbuf += " ";
+      }
+    }
+    flush();
+    if (!runs.length) continue;
+
+    paragraphs.push(new Paragraph({
+      children: runs,
+      spacing:  { before: spaceBefore, after: 0, line: 276, lineRule: "auto" },
+      indent:   indentLeft > 0 ? { left: indentLeft } : undefined,
+    }));
+  }
+
+  return paragraphs;
 }
 
 // ─── Build DOCX ───────────────────────────────────────────────────────────────
@@ -342,121 +494,103 @@ async function buildDocx(
 ): Promise<Buffer> {
   const {
     Document, Packer, Paragraph, TextRun, ImageRun,
-    FrameAnchorType, FrameWrap,
     HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
-    TextWrappingType, PageOrientation,
+    TextWrappingType, PageOrientation, SectionType,
   } = await import("docx");
 
   const PT_TWIP = 20;
   const PT_EMU  = 12700;
-
   const sections: any[] = [];
 
-  for (const { items, images, pageW, pageH } of pages) {
-    const children: any[] = [];
+  for (let pi = 0; pi < pages.length; pi++) {
+    const { items, images, pageW, pageH } = pages[pi];
+    const isFirstPage = pi === 0;
 
-    // ── Text frames ──────────────────────────────────────────────────────────
-    for (const frame of buildTextFrames(items, pageW)) {
-      const framePr = {
-        position: {
-          x: Math.round(frame.x * PT_TWIP),
-          y: Math.round(frame.y * PT_TWIP),
-        },
-        width:  Math.round(frame.width  * PT_TWIP),
-        height: Math.round(frame.height * PT_TWIP),
-        anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE },
-        wrap:   FrameWrap.NONE,
-        allowOverlap: true,
-      };
+    // Cluster into lines, detect layout, sort into reading order
+    const lineGroups = clusterLines(items, pageW);
+    const layout     = detectLayout(lineGroups, pageW, pageH);
+    const lines      = sortInReadingOrder(lineGroups, layout);
 
-      for (const lineItems of frame.lines) {
-        const runs: any[] = [];
-        let rbuf = ""; let rcur: RichItem | null = null;
+    // Clamp margins to sensible range
+    const marginTop    = Math.min(Math.max(Math.round(layout.topMargin    * PT_TWIP), 360), 1440);
+    const marginBottom = Math.min(Math.max(Math.round(layout.bottomMargin * PT_TWIP), 360), 1440);
+    const marginLeft   = Math.min(Math.max(Math.round(layout.leftMargin   * PT_TWIP), 360), 1440);
+    const marginRight  = Math.min(Math.max(Math.round(layout.rightMargin  * PT_TWIP), 360), 1440);
 
-        const flush = () => {
-          if (!rcur || !rbuf) return;
-          runs.push(new TextRun({
-            text:    rbuf,
-            bold:    rcur.bold,
-            italics: rcur.italic,
-            color:   rcur.color !== "000000" ? rcur.color : undefined,
-            size:    Math.max(16, Math.round(rcur.fontSize * 2)),
-          }));
-          rbuf = ""; rcur = null;
-        };
+    const pageProps = {
+      size: {
+        width:  Math.round(pageW * PT_TWIP),
+        height: Math.round(pageH * PT_TWIP),
+        orientation: pageW > pageH ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT,
+      },
+      margin: { top: marginTop, right: marginRight, bottom: marginBottom, left: marginLeft },
+    };
 
-        for (let ii = 0; ii < lineItems.length; ii++) {
-          const item = lineItems[ii];
-          const same = rcur !== null &&
-            rcur.bold === item.bold && rcur.italic === item.italic &&
-            rcur.color === item.color && Math.abs(rcur.fontSize - item.fontSize) < 0.5;
-          if (!same) { flush(); rcur = item; rbuf = item.str; }
-          else rbuf += item.str;
-
-          if (ii < lineItems.length - 1) {
-            const nxt = lineItems[ii + 1];
-            const approxRight = item.x + item.str.length * item.fontSize * 0.5;
-            if (!rbuf.endsWith(" ") && !nxt.str.startsWith(" ") &&
-                nxt.x > approxRight + item.fontSize * 0.1)
-              rbuf += " ";
-          }
-        }
-        flush();
-        if (!runs.length) continue;
-
-        children.push(new Paragraph({
-          children: runs,
-          frame:    framePr,
-          spacing:  { line: 240 },
-        }));
-      }
-    }
-
-    // ── Floating images ───────────────────────────────────────────────────────
-    for (const img of images) {
+    // Floating images (same for all layout types)
+    const imageParagraphs = images.map(img => {
       const scale = Math.min(1, (pageW * 0.98) / img.widthPt);
       const wPt   = img.widthPt  * scale;
       const hPt   = img.heightPt * scale;
       const wPx   = Math.round((wPt / 72) * 96);
       const hPx   = Math.round((hPt / 72) * 96);
-
-      children.push(new Paragraph({
+      return new Paragraph({
         children: [new ImageRun({
-          type: "png",
-          data: img.buf,
+          type: "png", data: img.buf,
           transformation: { width: wPx, height: hPx },
           floating: {
-            horizontalPosition: {
-              relative: HorizontalPositionRelativeFrom.PAGE,
-              offset:   Math.round(img.x * PT_EMU),
-            },
-            verticalPosition: {
-              relative: VerticalPositionRelativeFrom.PAGE,
-              offset:   Math.round(img.y * PT_EMU),
-            },
-            wrap:         { type: TextWrappingType.NONE },
-            allowOverlap: true,
-            behindDocument: false,
+            horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: Math.round(img.x * PT_EMU) },
+            verticalPosition:   { relative: VerticalPositionRelativeFrom.PAGE,   offset: Math.round(img.y * PT_EMU) },
+            wrap: { type: TextWrappingType.NONE }, allowOverlap: true, behindDocument: true,
           },
         })],
-      }));
-    }
-
-    children.push(new Paragraph({ children: [] }));
-
-    sections.push({
-      properties: {
-        page: {
-          size: {
-            width:  Math.round(pageW * PT_TWIP),
-            height: Math.round(pageH * PT_TWIP),
-            orientation: pageW > pageH ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT,
-          },
-          margin: { top: 0, right: 0, bottom: 0, left: 0 },
-        },
-      },
-      children,
+      });
     });
+
+    if (layout.columns === 1) {
+      // ── Single-column section ────────────────────────────────────────────────
+      const textParas = linesToParagraphs(lines, layout.leftMargin, Paragraph, TextRun);
+      sections.push({
+        properties: {
+          type: isFirstPage ? undefined : SectionType.NEXT_PAGE,
+          page: pageProps,
+          column: { count: 1 },
+        },
+        children: [...imageParagraphs, ...textParas, new Paragraph({ children: [] })],
+      });
+
+    } else {
+      // ── Two-column: header section + body section ────────────────────────────
+      const headerLines = lines.filter(l => l.colIndex === -1);
+      const bodyLines   = lines.filter(l => l.colIndex >= 0);
+
+      const headerParas = linesToParagraphs(headerLines, layout.leftMargin, Paragraph, TextRun);
+      const bodyParas   = linesToParagraphs(bodyLines,   layout.leftMargin, Paragraph, TextRun);
+
+      const colGapTwips = Math.round(layout.colGapPt * PT_TWIP);
+
+      // Section A: single-column header (or first page marker)
+      sections.push({
+        properties: {
+          type: isFirstPage ? undefined : SectionType.NEXT_PAGE,
+          page: pageProps,
+          column: { count: 1 },
+        },
+        children: [
+          ...imageParagraphs,
+          ...headerParas,
+          new Paragraph({ children: [] }),
+        ],
+      });
+
+      // Section B: two-column body, continuous (no page break)
+      sections.push({
+        properties: {
+          type: SectionType.CONTINUOUS,
+          column: { count: 2, space: colGapTwips, equalWidth: true },
+        },
+        children: [...bodyParas, new Paragraph({ children: [] })],
+      });
+    }
   }
 
   const doc = new Document({ sections });

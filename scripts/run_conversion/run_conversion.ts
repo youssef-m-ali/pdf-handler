@@ -1,7 +1,7 @@
 // Run with: node --experimental-strip-types scripts/run_conversion.ts <path-to-pdf>
 import { readFileSync, writeFileSync } from "fs";
 import path from "path";
-import { convertPdfToDocx } from "../lib/convert.ts";
+import { convertPdfToDocx } from "../../lib/convert.ts";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 

@@ -120,8 +120,12 @@ def extract_pdf(pdf_path: str):
                             elif isinstance(nc, float):
                                 color = hex_color(nc, nc, nc)
 
-                        bold   = "bold" in fname.lower()
-                        italic = "italic" in fname.lower() or "oblique" in fname.lower()
+                        fl     = fname.lower()
+                        bold   = ("bold"     in fl or "-bd"  in fl or "black" in fl or
+                                  "heavy"    in fl or "demi" in fl or "semibold" in fl or
+                                  "extrabold" in fl or "ultrabold" in fl)
+                        italic = ("italic" in fl or "oblique" in fl or "-it" in fl or
+                                  "-slant" in fl or "inclined" in fl)
 
                         items.append({
                             "str":      text,
@@ -188,25 +192,40 @@ def extract_docx(docx_path: str):
 
     items = []
 
+    def toggle_on(rpr, tag):
+        """Return True if an OOXML toggle property (w:b, w:i, …) is switched ON.
+
+        The docx library emits e.g. <w:b w:val="false"/> to explicitly override
+        a paragraph-level bold style.  A bare <w:b/> or w:val in {1,true,on,""} is ON;
+        w:val in {0,false,off} is OFF.  Absence of the element → False (not set).
+        """
+        el = rpr.find(tag, NS)
+        if el is None:
+            return False
+        val = el.get(f"{{{NS['w']}}}val", "1")
+        return val.lower() not in ("0", "false", "off")
+
     def run_style(rpr):
         """Extract style info from a w:rPr element."""
-        color   = "#000000"
-        size    = None
-        bold    = False
-        italic  = False
+        color  = "#000000"
+        size   = None
+        bold   = False
+        italic = False
         if rpr is not None:
             c = rpr.find("w:color", NS)
             if c is not None:
                 val = c.get(f"{{{NS['w']}}}val", "000000")
+                # "auto" = inherits default text color (black); skip "ffffff" (white)
                 if val.lower() not in ("auto", "ffffff"):
                     color = f"#{val.lower()}"
-            sz = rpr.find("w:sz", NS)
+            # w:sz is in half-points; prefer w:sz over w:szCs (complex script)
+            sz = rpr.find("w:sz", NS) or rpr.find("w:szCs", NS)
             if sz is not None:
                 v = sz.get(f"{{{NS['w']}}}val")
                 if v:
                     size = int(v) / 2
-            bold   = rpr.find("w:b", NS) is not None
-            italic = rpr.find("w:i", NS) is not None
+            bold   = toggle_on(rpr, "w:b")
+            italic = toggle_on(rpr, "w:i")
         return color, size, bold, italic
 
     def gather_runs(element, x=None, y=None, source="flow"):
@@ -272,17 +291,40 @@ def extract_docx(docx_path: str):
 
 # ─── String similarity ────────────────────────────────────────────────────────
 
+_LIGATURE_TABLE = str.maketrans({
+    "\ufb00": "ff",  "\ufb01": "fi",  "\ufb02": "fl",
+    "\ufb03": "ffi", "\ufb04": "ffl", "\ufb05": "st",
+    "\u2013": "-",   "\u2014": "-",   # en-dash, em-dash
+    "\u2018": "'",   "\u2019": "'",   # left/right single quotes
+    "\u201c": '"',   "\u201d": '"',   # left/right double quotes
+    "\u00a0": " ",                    # non-breaking space
+})
+
 def normalise(s: str) -> str:
+    """Lowercase, collapse whitespace, and normalise ligatures / smart punctuation."""
+    s = s.translate(_LIGATURE_TABLE)
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
 def similarity(a: str, b: str) -> float:
-    """Longest-common-substring ratio (O(n²) — most accurate)."""
+    """String similarity combining containment and longest-common-substring.
+
+    Containment bonus: if the shorter string is fully contained in the longer,
+    score = len(short)/len(long) + 0.35.  This lets a short PDF run match a
+    longer DOCX run that wraps it (e.g. when DOCX paragraph-groups multiple
+    PDF items into one run) — match fires when the shorter is ≥ 40 % of the
+    longer (0.40 + 0.35 = 0.75 ≥ threshold).
+
+    Otherwise falls back to LCS ratio.
+    """
     na, nb = normalise(a), normalise(b)
     if na == nb:
         return 1.0
     if not na or not nb:
         return 0.0
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if short in long_:
+        return min(1.0, len(short) / len(long_) + 0.35)
     best = 0
     for i in range(len(na)):
         for j in range(len(nb)):
@@ -374,9 +416,13 @@ def compare(pdf_pages, docx_pages):
                     if delta <= 1:
                         size_matches += 1
 
-                # Bold / italic
+                # Bold / italic (store individual values for easier debugging)
                 style_total += 1
+                detail["bold_pdf"]     = pdf_item["bold"]
+                detail["bold_docx"]    = d["bold"]
                 detail["bold_match"]   = pdf_item["bold"] == d["bold"]
+                detail["italic_pdf"]   = pdf_item["italic"]
+                detail["italic_docx"]  = d["italic"]
                 detail["italic_match"] = pdf_item["italic"] == d["italic"]
                 if detail["bold_match"]:   bold_matches   += 1
                 if detail["italic_match"]: italic_matches += 1
@@ -469,6 +515,7 @@ def main():
     print(f"Color accuracy:    {s['color_accuracy_pct']}%", file=sys.stderr)
     print(f"Size accuracy:     {s['size_accuracy_pct']}%", file=sys.stderr)
     print(f"Bold accuracy:     {s['bold_accuracy_pct']}%", file=sys.stderr)
+    print(f"Italic accuracy:   {s['italic_accuracy_pct']}%", file=sys.stderr)
     print(f"Images:            PDF={s['pdf_image_count']}  DOCX={s['docx_image_count']}  ({s['image_coverage_pct']}%)", file=sys.stderr)
     print("────────────────────────────────────────────────────────────", file=sys.stderr)
 

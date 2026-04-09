@@ -1,7 +1,7 @@
 // Run with: node --experimental-strip-types scripts/run_compressions.ts <path-to-pdf> [--level=light|balanced|extreme]
 import { readFileSync, writeFileSync } from "fs";
 import path from "path";
-import { compressLight, compressBalanced, compressExtreme } from "../lib/compress.ts";
+import { compressLight, compressBalanced, compressExtreme } from "../../lib/compress.ts";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 

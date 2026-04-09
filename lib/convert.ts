@@ -291,7 +291,11 @@ function clusterLines(items: RichItem[], pageW: number): RichItem[][] {
 
   const yGroups: RichItem[][] = [[sorted[0]]];
   for (let i = 1; i < sorted.length; i++) {
-    const tol = Math.max(sorted[i - 1].fontSize, sorted[i].fontSize) * 0.55;
+    // Use min (not max) so mixed-size adjacent lines don't merge.
+    // e.g. 18pt title "Store" and 12pt author "Giuseppe" with 7pt gap:
+    //   max-based tol = 9.9pt → merged (wrong)
+    //   min-based tol = 6.6pt → separate (correct)
+    const tol = Math.min(sorted[i - 1].fontSize, sorted[i].fontSize) * 0.55;
     if (Math.abs(sorted[i].y - sorted[i - 1].y) <= tol)
       yGroups[yGroups.length - 1].push(sorted[i]);
     else
@@ -315,14 +319,17 @@ function clusterLines(items: RichItem[], pageW: number): RichItem[][] {
 }
 
 interface Layout {
-  columns:        number;
-  colBoundary:    number;
-  colGapPt:       number;
-  leftMargin:     number;
-  rightMargin:    number;
-  topMargin:      number;
-  bottomMargin:   number;
-  headerLineIdxs: Set<number>;
+  columns:         number;
+  colBoundary:     number;
+  colGapPt:        number;
+  leftColWidthPt:  number;
+  rightColWidthPt: number;
+  leftMargin:      number;
+  rightMargin:     number;
+  topMargin:       number;
+  bottomMargin:    number;
+  headerLineIdxs:  Set<number>;
+  bodyJustified:   boolean;
 }
 
 function detectLayout(lineGroups: RichItem[][], pageW: number, pageH: number): Layout {
@@ -358,27 +365,57 @@ function detectLayout(lineGroups: RichItem[][], pageW: number, pageH: number): L
   const topMargin    = allYTops.length ? Math.min(...allYTops) : 72;
   const bottomMargin = allYBots.length ? pageH - Math.max(...allYBots) : 72;
 
+  // Detect justification: justified text has most body lines ending at the same
+  // right edge (within 3pt tolerance). Check each column side independently and
+  // combine — if either side is justified the page is justified.
+  function isJustified(spans: { xMin: number; xMax: number }[]): boolean {
+    const xMaxes = spans.map(s => s.xMax);
+    if (xMaxes.length < 4) return false;
+    const modal = xMaxes.reduce((best, v) => {
+      const count = xMaxes.filter(x => Math.abs(x - v) <= 3).length;
+      return count > best.count ? { v, count } : best;
+    }, { v: 0, count: 0 });
+    return modal.count / xMaxes.length >= 0.5;
+  }
+
+  const noColWidths = { leftColWidthPt: 0, rightColWidthPt: 0 };
+
   if (bodySpans.length < 6) {
-    return { columns: 1, colBoundary: 0, colGapPt: 0, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
+    const bodyJustified = isJustified(bodySpans);
+    return { columns: 1, colBoundary: 0, colGapPt: 0, ...noColWidths, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs, bodyJustified };
   }
 
   const leftBodySpans  = bodySpans.filter(s => s.xMin < pageW * 0.5);
   const rightBodySpans = bodySpans.filter(s => s.xMin >= pageW * 0.5);
 
   if (leftBodySpans.length >= 5 && rightBodySpans.length >= 5) {
-    // Use right edge of left column (max xMax) and left edge of right column (min xMin).
-    // This measures the actual white-space gap between columns, not dependent on
-    // any specific line's xMin position.
-    const leftEdge  = Math.max(...leftBodySpans.map(s => s.xMax));
-    const rightEdge = Math.min(...rightBodySpans.map(s => s.xMin));
+    // Use the MODE of right-edges for the left column and the MODE of left-edges
+    // for the right column.  max(xMax) is unreliable because a single wide item
+    // (outlier) inflates it far past the true column boundary.  The mode (most
+    // common value within a 3pt tolerance) reflects where the majority of
+    // justified lines actually end.
+    function modeEdge(vals: number[]): number {
+      return vals.reduce((best, v) => {
+        const count = vals.filter(x => Math.abs(x - v) <= 3).length;
+        return count > best.count ? { v, count } : best;
+      }, { v: vals[0], count: 0 }).v;
+    }
+
+    const leftEdge  = modeEdge(leftBodySpans.map(s => s.xMax));
+    const rightEdge = modeEdge(rightBodySpans.map(s => s.xMin));
+    // colBoundary for column-assignment still uses the midpoint of the gap
+    const colBoundary = (leftEdge + rightEdge) / 2;
     const gap = rightEdge - leftEdge;
     if (gap >= 4 && gap <= pageW * 0.3) {
-      const colBoundary = (leftEdge + rightEdge) / 2;
-      return { columns: 2, colBoundary, colGapPt: gap, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
+      const leftColWidthPt  = leftEdge  - leftMargin;
+      const rightColWidthPt = (pageW - rightMargin) - rightEdge;
+      const bodyJustified   = isJustified(leftBodySpans) || isJustified(rightBodySpans);
+      return { columns: 2, colBoundary, colGapPt: gap, leftColWidthPt, rightColWidthPt, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs, bodyJustified };
     }
   }
 
-  return { columns: 1, colBoundary: 0, colGapPt: 0, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs };
+  const bodyJustified = isJustified(bodySpans);
+  return { columns: 1, colBoundary: 0, colGapPt: 0, ...noColWidths, leftMargin, rightMargin, topMargin, bottomMargin, headerLineIdxs, bodyJustified };
 }
 
 function sortInReadingOrder(lineGroups: RichItem[][], layout: Layout, pageW: number): Line[] {
@@ -419,55 +456,14 @@ function linesToParagraphs(
   lines: Line[],
   colLeftEdges: Record<number, number>,
   Paragraph: any, TextRun: any, AlignmentType: any,
+  bodyJustified = false,
 ): any[] {
   const PT_TWIP = 20;
 
-  // ── Step 1: group consecutive lines into paragraph groups ──────────────────
-  // A new paragraph starts when:
-  //   • the column changes (colIndex differs), or
-  //   • there is a vertical gap larger than normal line spacing
-  // Grouping lets Word's justification engine reflow the whole paragraph,
-  // which compensates for minor font-metric differences between the PDF's
-  // embedded font and the system font.
-  interface Group { lines: Line[]; spaceBefore: number }
-  const groups: Group[] = [];
-  let prevBottom = -1;
-  let prevColIdx = -99;
-
-  for (const line of lines) {
-    let spaceBefore = 0;
-    const sameCol = line.colIndex === prevColIdx;
-    if (prevBottom >= 0 && sameCol) {
-      const gap = line.yTop - prevBottom;
-      const normalLineGap = line.fontSize * 0.5;
-      if (gap > normalLineGap) {
-        const extraPt = Math.min(gap - normalLineGap, 20);
-        spaceBefore = Math.round(extraPt * PT_TWIP);
-      }
-    }
-    prevBottom = line.yTop + line.fontSize;
-    prevColIdx = line.colIndex;
-
-    if (spaceBefore > 0 || groups.length === 0 || !sameCol) {
-      groups.push({ lines: [line], spaceBefore });
-    } else {
-      groups[groups.length - 1].lines.push(line);
-    }
-  }
-
-  // ── Step 2: build one Paragraph per group ─────────────────────────────────
-  const paragraphs: any[] = [];
-
-  for (const group of groups) {
-    const firstLine  = group.lines[0];
-    const isCentered = firstLine.centered;
-    const colEdge    = colLeftEdges[firstLine.colIndex] ?? colLeftEdges[0] ?? 0;
-    const lineX      = Math.min(...firstLine.items.map(i => i.x));
-    const indentLeft = isCentered ? 0 : Math.max(0, Math.round((lineX - colEdge) * PT_TWIP));
-
+  // ── Helper: build TextRun[] from a sorted list of items ───────────────────
+  function buildRuns(items: RichItem[]): any[] {
     const runs: any[] = [];
     let rbuf = "", rcur: RichItem | null = null;
-    let needSpace = false; // inject a space at the start of each continuation line
 
     const flush = () => {
       if (!rcur || !rbuf) return;
@@ -482,52 +478,143 @@ function linesToParagraphs(
       rbuf = ""; rcur = null;
     };
 
-    for (let li = 0; li < group.lines.length; li++) {
-      const line = group.lines[li];
-      if (li > 0) needSpace = true; // line boundary → need a separator space
+    for (let ii = 0; ii < items.length; ii++) {
+      const item = items[ii];
+      const sameStyle = rcur !== null &&
+        rcur.bold === item.bold && rcur.italic === item.italic &&
+        rcur.color === item.color && Math.abs(rcur.fontSize - item.fontSize) < 0.5 &&
+        rcur.fontFamily === item.fontFamily;
 
-      for (let ii = 0; ii < line.items.length; ii++) {
-        const item = line.items[ii];
-        const sameStyle = rcur !== null &&
-          rcur.bold === item.bold && rcur.italic === item.italic &&
-          rcur.color === item.color && Math.abs(rcur.fontSize - item.fontSize) < 0.5 &&
-          rcur.fontFamily === item.fontFamily;
+      if (!sameStyle) { flush(); rcur = item; rbuf = item.str; }
+      else            { rbuf += item.str; }
 
-        if (!sameStyle) {
-          flush();
-          rcur = item;
-          rbuf = (needSpace && !item.str.startsWith(" ")) ? " " + item.str : item.str;
-          needSpace = false;
-        } else {
-          if (needSpace && !rbuf.endsWith(" ") && !item.str.startsWith(" "))
-            rbuf += " ";
-          needSpace = false;
-          rbuf += item.str;
-        }
-
-        // Auto-space between items within the same line
-        if (ii < line.items.length - 1) {
-          const nxt       = line.items[ii + 1];
-          const itemRight = item.x + (item.width > 0 ? item.width : item.str.length * item.fontSize * 0.55);
-          if (!rbuf.endsWith(" ") && !nxt.str.startsWith(" ") &&
-              nxt.x > itemRight + item.fontSize * 0.1)
-            rbuf += " ";
-        }
+      // Auto-space between adjacent items when there is a visual gap
+      if (ii < items.length - 1) {
+        const nxt       = items[ii + 1];
+        const itemRight = item.x + (item.width > 0 ? item.width : item.str.length * item.fontSize * 0.55);
+        if (!rbuf.endsWith(" ") && !nxt.str.startsWith(" ") &&
+            nxt.x > itemRight + item.fontSize * 0.1)
+          rbuf += " ";
       }
     }
     flush();
-    if (!runs.length) continue;
+    return runs;
+  }
+
+  const bodyAlign = bodyJustified ? AlignmentType.JUSTIFIED : AlignmentType.LEFT;
+
+  // ── Pass 1: group PDF lines into Word paragraphs ──────────────────────────
+  // Lines belong to the same Word paragraph unless separated by a significant
+  // vertical gap, a column/centered change, or an inline heading split.
+  type PGroupLine = { items: RichItem[]; colIndex: number };
+  type PGroup = {
+    lines:       PGroupLine[];
+    spaceBefore: number;
+    colIndex:    number;
+    centered:    boolean;
+    isHeading:   boolean;
+  };
+
+  const groups: PGroup[] = [];
+  let cur: PGroup | null = null;
+  let prevBottom = -1;
+  let prevColIdx = -99;
+
+  for (const line of lines) {
+    let spaceBefore = 0;
+    const sameCol = line.colIndex === prevColIdx;
+    if (prevBottom >= 0 && sameCol) {
+      const gap           = line.yTop - prevBottom;
+      const normalLineGap = line.fontSize * 0.5;
+      if (gap > normalLineGap) {
+        const extraPt = Math.min(gap - normalLineGap, 20);
+        spaceBefore   = Math.round(extraPt * PT_TWIP);
+      }
+    }
+    prevBottom = line.yTop + line.fontSize;
+    prevColIdx = line.colIndex;
+
+    const sortedItems = [...line.items].sort((a, b) => a.x - b.x);
+
+    // ── Inline heading detection ─────────────────────────────────────────────
+    const hasBoldStart = sortedItems.length > 0 && sortedItems[0].bold;
+    const inlineBreak  = hasBoldStart ? sortedItems.findIndex(it => !it.bold) : -1;
+
+    if (inlineBreak > 0) {
+      if (cur) groups.push(cur);
+
+      // Heading as its own non-mergeable paragraph
+      groups.push({
+        lines:       [{ items: sortedItems.slice(0, inlineBreak), colIndex: line.colIndex }],
+        spaceBefore, colIndex: line.colIndex, centered: line.centered, isHeading: true,
+      });
+
+      // Body portion of same PDF line starts a new group
+      cur = {
+        lines:       [{ items: sortedItems.slice(inlineBreak), colIndex: line.colIndex }],
+        spaceBefore: 0, colIndex: line.colIndex, centered: line.centered, isHeading: false,
+      };
+      continue;
+    }
+
+    // Force a break when a heading (all-bold group) is followed by body text
+    const prevIsAllBold = cur && cur.lines.length > 0 &&
+      cur.lines.every(l => l.items.every(i => i.bold));
+    const curHasNonBold = sortedItems.some(i => !i.bold);
+
+    // Start a new group on gap, column change, centered change, or heading→body
+    const needsNew = !cur
+      || spaceBefore > 0
+      || line.colIndex !== cur.colIndex
+      || line.centered !== cur.centered
+      || (prevIsAllBold && curHasNonBold);
+
+    if (needsNew) {
+      if (cur) groups.push(cur);
+      cur = { lines: [], spaceBefore, colIndex: line.colIndex, centered: line.centered, isHeading: false };
+    }
+    cur!.lines.push({ items: sortedItems, colIndex: line.colIndex });
+  }
+  if (cur) groups.push(cur);
+
+  // ── Pass 2: render each group as one Paragraph ────────────────────────────
+  const paragraphs: any[] = [];
+
+  for (const group of groups) {
+    if (!group.lines.length) continue;
+
+    const isCentered = group.centered;
+    const isBodyPara = !isCentered && group.colIndex >= 0;
+    const colEdge    = colLeftEdges[group.colIndex] ?? colLeftEdges[0] ?? 0;
+
+    // Concatenate runs from all lines; add a space TextRun between lines so
+    // words don't run together when Word re-wraps the merged paragraph.
+    const allRuns: any[] = [];
+    for (let li = 0; li < group.lines.length; li++) {
+      const lineRuns = buildRuns(group.lines[li].items);
+      if (li > 0 && allRuns.length && lineRuns.length) {
+        const firstItem = group.lines[li].items[0];
+        allRuns.push(new TextRun({
+          text: " ",
+          size: Math.max(16, Math.round(firstItem.fontSize * 2)),
+          font: firstItem.fontFamily ? { name: firstItem.fontFamily } : undefined,
+        }));
+      }
+      allRuns.push(...lineRuns);
+    }
+    if (!allRuns.length) continue;
+
+    // Indent: leftmost x of the first line
+    const lineX      = Math.min(...group.lines[0].items.map(i => i.x));
+    const indentLeft = isCentered ? 0 : Math.max(0, Math.round((lineX - colEdge) * PT_TWIP));
+    const indentObj: Record<string, number> = {};
+    if (indentLeft > 0) indentObj.left = indentLeft;
 
     paragraphs.push(new Paragraph({
-      children:  runs,
-      // Justified for body text: Word stretches each line to fill the column,
-      // compensating for any font-metric delta vs the PDF's embedded font.
-      // Centred for header lines. Single-line paragraphs with JUSTIFIED are
-      // rendered left-aligned by Word (last-line rule), which is correct for
-      // section headings and other short lines.
-      alignment: isCentered ? AlignmentType.CENTER : AlignmentType.JUSTIFIED,
+      children:  allRuns,
+      alignment: isCentered ? AlignmentType.CENTER : isBodyPara ? bodyAlign : AlignmentType.LEFT,
       spacing:   { before: group.spaceBefore, after: 0 },
-      indent:    indentLeft > 0 ? { left: indentLeft } : undefined,
+      indent:    Object.keys(indentObj).length ? indentObj : undefined,
     }));
   }
 
@@ -540,7 +627,7 @@ async function buildDocx(
   const {
     Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType,
     HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
-    TextWrappingType, PageOrientation, SectionType,
+    TextWrappingType, PageOrientation, SectionType, Column,
   } = await import("docx");
 
   const PT_TWIP = 20;
@@ -551,14 +638,26 @@ async function buildDocx(
     const { items, images, pageW, pageH } = pages[pi];
     const isFirstPage = pi === 0;
 
-    const lineGroups = clusterLines(items, pageW);
+    // Filter out isolated page numbers: short numeric-only items sitting in the
+    // bottom 8% of the page with no other items on the same line.
+    const bottomThreshold = pageH * 0.92;
+    const filteredItems = items.filter(item => {
+      if (item.y < bottomThreshold) return true;
+      const isNumeric = /^\s*\d+\s*$/.test(item.str);
+      if (!isNumeric) return true;
+      // Keep if there are other items on the same line (within 5pt vertically)
+      const hasNeighbours = items.some(o => o !== item && Math.abs(o.y - item.y) < 5);
+      return hasNeighbours;
+    });
+
+    const lineGroups = clusterLines(filteredItems, pageW);
     const layout     = detectLayout(lineGroups, pageW, pageH);
     const lines      = sortInReadingOrder(lineGroups, layout, pageW);
 
-    const marginTop    = Math.min(Math.max(Math.round(layout.topMargin    * PT_TWIP), 360), 1440);
-    const marginBottom = Math.min(Math.max(Math.round(layout.bottomMargin * PT_TWIP), 360), 1440);
-    const marginLeft   = Math.min(Math.max(Math.round(layout.leftMargin   * PT_TWIP), 360), 1440);
-    const marginRight  = Math.min(Math.max(Math.round(layout.rightMargin  * PT_TWIP), 360), 1440);
+    const marginTop    = Math.round(layout.topMargin    * PT_TWIP);
+    const marginBottom = Math.round(layout.bottomMargin * PT_TWIP);
+    const marginLeft   = Math.round(layout.leftMargin   * PT_TWIP);
+    const marginRight  = Math.round(layout.rightMargin  * PT_TWIP);
 
     const pageProps = {
       size: {
@@ -588,8 +687,12 @@ async function buildDocx(
       });
     });
 
+    // Word left margin in points — used as the column-0 reference for indent.
+    // Paragraph indent = (pdfX - wordMarginPt) * PT_TWIP.
+    const wordMarginPt = layout.leftMargin;
+
     if (layout.columns === 1) {
-      const textParas = linesToParagraphs(lines, { [-1]: layout.leftMargin, 0: layout.leftMargin }, Paragraph, TextRun, AlignmentType);
+      const textParas = linesToParagraphs(lines, { [-1]: wordMarginPt, 0: wordMarginPt }, Paragraph, TextRun, AlignmentType, layout.bodyJustified);
       sections.push({
         properties: {
           type: isFirstPage ? undefined : SectionType.NEXT_PAGE,
@@ -602,11 +705,13 @@ async function buildDocx(
       const headerLines = lines.filter(l => l.colIndex === -1);
       const bodyLines   = lines.filter(l => l.colIndex >= 0);
 
-      const headerParas   = linesToParagraphs(headerLines, { [-1]: layout.leftMargin }, Paragraph, TextRun, AlignmentType);
+      const headerParas   = linesToParagraphs(headerLines, { [-1]: wordMarginPt }, Paragraph, TextRun, AlignmentType);
       const rightColStart = layout.colBoundary + layout.colGapPt / 2;
-      const bodyParas     = linesToParagraphs(bodyLines, { 0: layout.leftMargin, 1: rightColStart }, Paragraph, TextRun, AlignmentType);
+      const bodyParas     = linesToParagraphs(bodyLines, { 0: wordMarginPt, 1: rightColStart }, Paragraph, TextRun, AlignmentType, layout.bodyJustified);
 
-      const colGapTwips = Math.round(layout.colGapPt * PT_TWIP);
+      const colGapTwips      = Math.round(layout.colGapPt        * PT_TWIP);
+      const leftColTwips     = Math.round(layout.leftColWidthPt  * PT_TWIP);
+      const rightColTwips    = Math.round(layout.rightColWidthPt * PT_TWIP);
 
       sections.push({
         properties: {
@@ -624,7 +729,15 @@ async function buildDocx(
       sections.push({
         properties: {
           type: SectionType.CONTINUOUS,
-          column: { count: 2, space: colGapTwips, equalWidth: true },
+          page: pageProps,
+          column: {
+            count: 2,
+            equalWidth: false,
+            children: [
+              new Column({ width: leftColTwips,  space: colGapTwips }),
+              new Column({ width: rightColTwips }),
+            ],
+          },
         },
         children: [...bodyParas, new Paragraph({ children: [] })],
       });
